@@ -30,7 +30,6 @@ def calculate_atr_tp_sl(df, idx, holding_days=10):
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=14).mean().iloc[-1]
         
-        # Penyesuaian ATR multiplier & target profit untuk fast swing yang sehat
         multiplier = 1.8 if holding_days <= 7 else 2.0
         tp_target_mult = 1.07 if holding_days <= 7 else 1.10
         
@@ -57,7 +56,6 @@ def evaluate_stock_atr_adaptive(df):
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         
-        # Mesin pencari durasi fast swing optimal (7, 10, 14 Hari)
         candidate_holding_periods = [7, 10, 14]
         best_win_rate = -1
         best_holding_period = 10
@@ -135,7 +133,6 @@ def evaluate_stock_atr_adaptive(df):
         reward = tp_today - current_price
         rr = reward / risk if risk > 0 else 0
         
-        # Skoring fleksibel
         score = 0
         if recent_cross:
             score += 30
@@ -196,7 +193,6 @@ def run_scanner():
                 
             has_signal, score, win_rate, holding_days, total_trades, sl, tp, rr = evaluate_stock_atr_adaptive(df)
             
-            # Saringan Realistis: Score >= 65, WR >= 55%, RR >= 1.3
             if has_signal and score >= 65 and total_trades >= 1 and win_rate >= 55.0 and rr >= 1.3:
                 ticker_name = symbol.replace(".JK", "")
                 candidates.append({
@@ -219,7 +215,9 @@ def run_scanner():
         
         signals = []
         for item in top_candidates:
-            signals.append(f"🎯 *{item['symbol']}* (ATR WR: {item['win_rate']:.0f}% | Hold: ~{item['holding_days']} Hari | RR: {item['rr']:.1f})\n  • Harga Masuk: {item['price']:.0f}\n  • 🔴 SL: {item['sl']}\n  • 🟢 TP: {item['tp']}")
+            sl_pct = ((item['sl'] - item['price']) / item['price']) * 100
+            tp_pct = ((item['tp'] - item['price']) / item['price']) * 100
+            signals.append(f"🎯 *{item['symbol']}* (ATR WR: {item['win_rate']:.0f}% | Hold: ~{item['holding_days']} Hari | RR: {item['rr']:.1f})\n  • Harga Masuk: {item['price']:.0f}\n  • 🔴 SL: {item['sl']} ({sl_pct:.1f}%)\n  • 🟢 TP: {item['tp']} (+{tp_pct:.1f}%)")
             
         message = "🚀 **REALISTIC ATR FAST SWING SIGNALS** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Disaring dengan ATR dinamis, WR >= 55%, & RR >= 1.3._"
         send_telegram(message)
