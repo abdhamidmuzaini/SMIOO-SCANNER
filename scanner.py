@@ -4,10 +4,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# Konfigurasi Telegram & Modal Dasar
+# Konfigurasi Telegram
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-BASE_MODAL = 5000000  # Modal dasar Rp 5.000.000
 
 
 def send_telegram_message(message):
@@ -16,7 +15,6 @@ def send_telegram_message(message):
     return
   url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
 
-  # Pecah pesan jika melebihi batas 4000 karakter Telegram
   if len(message) > 4000:
     chunks = [message[i : i + 4000] for i in range(0, len(message), 4000)]
     for chunk in chunks:
@@ -33,39 +31,8 @@ def send_telegram_message(message):
       print(f'Error koneksi Telegram: {e}')
 
 
-def check_market_regime():
-  try:
-    ihsg = yf.download('^JKSE', period='3mo', progress=False)
-    if ihsg.empty:
-      return 1.0, 'Netral (Default)'
-
-    if isinstance(ihsg.columns, pd.MultiIndex):
-      close_col = ihsg['Close'].iloc[:, 0]
-    else:
-      close_col = ihsg['Close']
-
-    current_close = close_col.iloc[-1]
-    ma20 = close_col.rolling(window=20).mean().iloc[-1]
-    ma50 = close_col.rolling(window=50).mean().iloc[-1]
-
-    if current_close > ma20 and ma20 > ma50:
-      return 1.0, '🟢 BULLISH KUAT (Alokasi 100%)'
-    elif current_close > ma50:
-      return 0.6, '🟡 SIDEWAYS / WSP (Alokasi 60%)'
-    else:
-      return 0.2, '🔴 BEARISH / DOWN (Mode Defensif 20%)'
-  except Exception as e:
-    print(f'Gagal cek IHSG: {e}')
-    return 0.5, 'Netral (Fallback)'
-
-
 def main():
-  regime_multiplier, regime_status = check_market_regime()
-  adjusted_modal = BASE_MODAL * regime_multiplier
-
-  report = f'📊 *STATUS REZIM PASAR:* {regime_status}\n'
-  report += f'💰 *Alokasi Modal Efektif:* Rp {int(adjusted_modal):,}\n\n'
-  report += '🚀 *Daftar Sinyal Saham (SMIOO + ATR):*\n\n'
+  report = '🚀 *Sinyal Saham (SMIOO GC + Filter Ketat):*\n\n'
 
   try:
     with open('tickers.txt', 'r') as f:
@@ -76,7 +43,6 @@ def main():
   found_signal_count = 0
 
   for raw in raw_tickers:
-    # Bersihkan ticker: hapus tanda $, spasi, dan pastikan berakhiran .JK
     ticker = raw.replace('$', '').strip().upper()
     if not ticker.endswith('.JK'):
       ticker += '.JK'
@@ -88,45 +54,96 @@ def main():
 
       if isinstance(df.columns, pd.MultiIndex):
         close = df['Close'].iloc[:, 0]
+        open_p = df['Open'].iloc[:, 0]
         high = df['High'].iloc[:, 0]
         low = df['Low'].iloc[:, 0]
+        volume = df['Volume'].iloc[:, 0]
       else:
         close = df['Close']
+        open_p = df['Open']
         high = df['High']
         low = df['Low']
+        volume = df['Volume']
 
+      last_close = float(close.iloc[-1])
+      last_open = float(open_p.iloc[-1])
+
+      # 1. FILTER RENTANG HARGA: 70 - 1000
+      if not (70 <= last_close <= 1000):
+        continue
+
+      # 2. FILTER TRANSAKSI 20 HARI > 2 MILIAR
+      traded_value = close * volume
+      avg_value_20 = traded_value.rolling(window=20).mean().iloc[-1]
+      if avg_value_20 < 2_000_000_000:
+        continue
+
+      # 3. CANDLE BULLISH: C > O minimal 3%
+      candle_pct = ((last_close - last_open) / last_open) * 100
+      if candle_pct < 3.0:
+        continue
+
+      # 4. HARGA > MA5
+      ma5 = close.rolling(window=5).mean().iloc[-1]
+      if last_close <= ma5:
+        continue
+
+      # 5. INDIKATOR SMIOO GOLDEN CROSS (GC)
+      high_n = high.rolling(14).max()
+      low_n = low.rolling(14).min()
+      midpoint = (high_n + low_n) / 2
+      diff = close - midpoint
+      ema2_diff = (
+          diff.ewm(span=3, adjust=False).mean().ewm(span=3, adjust=False).mean()
+      )
+      ema2_hl = (
+          (high_n - low_n)
+          .ewm(span=3, adjust=False)
+          .mean()
+          .ewm(span=3, adjust=False)
+          .mean()
+      )
+
+      smioo = (ema2_diff / (ema2_hl / 2)) * 100
+      smioo_signal = smioo.ewm(span=4, adjust=False).mean()
+
+      # Cek Golden Cross
+      is_gc = (smioo.iloc[-1] > smioo_signal.iloc[-1]) and (
+          smioo.iloc[-2] <= smioo_signal.iloc[-2]
+      )
+      if not is_gc:
+        continue
+
+      # Hitung ATR untuk TP & SL
       tr1 = high - low
       tr2 = abs(high - close.shift())
       tr3 = abs(low - close.shift())
       tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
       atr = tr.rolling(14).mean().iloc[-1]
 
-      last_close = float(close.iloc[-1])
       tp_price = last_close + (1.5 * atr)
       sl_price = last_close - (1.0 * atr)
 
       tp_pct = ((tp_price - last_close) / last_close) * 100
       sl_pct = ((last_close - sl_price) / last_close) * 100
 
-      max_alloc_per_stock = adjusted_modal * 0.25
-      shares_to_buy = max_alloc_per_stock / last_close
-      lots = int(shares_to_buy // 100)
-      if lots < 1:
-        lots = 1
-
       found_signal_count += 1
       clean_name = ticker.replace('.JK', '')
       report += f'📌 *{clean_name}* (Harga: Rp {int(last_close)})\n'
+      report += f'   • Kenaikan Harian: +{candle_pct:.1f}%\n'
       report += f'   • TP: Rp {int(tp_price)} (+{tp_pct:.1f}%)\n'
-      report += f'   • SL: Rp {int(sl_price)} (-{sl_pct:.1f}%)\n'
-      report += f'   • Rekomendasi Beli: *{lots} Lot*\n\n'
+      report += f'   • SL: Rp {int(sl_price)} (-{sl_pct:.1f}%)\n\n'
+
+      if found_signal_count >= 10:
+        break
 
     except Exception as e:
       continue
 
   if found_signal_count == 0:
     report += (
-        'Belum ada emiten yang memenuhi kriteria kuat hari ini. *Cash is King!*'
+        'Belum ada emiten yang lolos kriteria SMIOO GC & likuiditas hari'
+        ' ini. *Cash is King!*'
     )
 
   send_telegram_message(report)
