@@ -31,34 +31,33 @@ def calculate_dynamic_tp_sl(df, idx):
         atr = tr.rolling(window=14).mean().iloc[-1]
         
         if pd.isna(atr) or atr <= 0:
-            sl = current_price * 0.95
-            tp = current_price * 1.10
+            sl = current_price * 0.93
+            tp = current_price * 1.15
         else:
-            sl = current_price - (1.5 * atr)
-            tp = current_price + (3.0 * atr)
+            sl = current_price - (2.0 * atr)
+            tp = current_price * 1.15
             
         return round(sl, 2), round(tp, 2)
     except Exception:
         cp = float(df['Close'].iloc[idx])
-        return round(cp * 0.95, 2), round(cp * 1.10, 2)
+        return round(cp * 0.93, 2), round(cp * 1.15, 2)
 
-def evaluate_stock(df):
+def evaluate_stock_adaptive(df):
     try:
         if len(df) < 60:
             return False, 0, 0, 0, 0, 0
             
-        # Indikator Utama
         df['SMIOO_Blue'] = df['Close'].ewm(span=12, adjust=False).mean()
         df['SMIOO_Orange'] = df['SMIOO_Blue'].ewm(span=9, adjust=False).mean()
         df['MA5'] = df['Close'].rolling(window=5).mean()
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         
-        # --- 1. BACKTEST HISTORIS (Win Rate) ---
         wins = 0
         total_trades = 0
         
-        for i in range(30, len(df) - 10):
+        # Backtest dari awal data (Jan 2024) sampai 30 hari sebelum hari ini
+        for i in range(30, len(df) - 30):
             b_prev = df['SMIOO_Blue'].iloc[i-1]
             b_curr = df['SMIOO_Blue'].iloc[i]
             o_prev = df['SMIOO_Orange'].iloc[i-1]
@@ -67,24 +66,27 @@ def evaluate_stock(df):
             if (b_prev <= o_prev) and (b_curr > o_curr) and (b_curr > b_prev):
                 sl, tp = calculate_dynamic_tp_sl(df, i)
                 trade_win = False
-                for j in range(1, 11):
+                
+                # Simulasi swing hingga 30 hari ke depan
+                for j in range(1, 31):
                     if i + j >= len(df):
                         break
                     high_future = float(df['High'].iloc[i+j])
                     low_future = float(df['Low'].iloc[i+j])
+                    
                     if high_future >= tp:
                         trade_win = True
                         break
                     if low_future <= sl:
                         trade_win = False
                         break
+                
                 total_trades += 1
                 if trade_win:
                     wins += 1
                     
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
         
-        # --- 2. CEK KONDISI HARI INI ---
         current_price = float(df['Close'].iloc[-1])
         b_prev_today = df['SMIOO_Blue'].iloc[-2]
         b_curr_today = df['SMIOO_Blue'].iloc[-1]
@@ -97,7 +99,6 @@ def evaluate_stock(df):
         if not (is_crossover and is_slope_up):
             return False, 0, 0, 0, 0, 0
             
-        # --- 3. SKORING TEKNIKAL HARI INI (Maks 100) ---
         ma5 = float(df['MA5'].iloc[-1])
         ma20 = float(df['MA20'].iloc[-1])
         vol_today = float(df['Volume'].iloc[-1])
@@ -153,37 +154,36 @@ def run_scanner():
     
     for symbol in tickers:
         try:
+            # Tarik data historis mutlak mulai dari 1 Januari 2024
             ticker_obj = yf.Ticker(symbol)
-            df = ticker_obj.history(period="6mo")
+            df = ticker_obj.history(start="2024-01-01")
             if df is None or len(df) < 60:
                 continue
                 
             current_price = float(df['Close'].iloc[-1])
             val_ma20 = float((df['Close'] * df['Volume']).rolling(window=20).mean().iloc[-1])
             
-            # Filter Dasar: Harga (70 - <1000) & Transaksi (>2 Miliar)
             if not (70 <= current_price < 1000 and val_ma20 > 2_000_000_000):
                 continue
                 
-            has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock(df)
+            has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock_adaptive(df)
             
-            # SYARAT UTAMA: Skor >= 85 DAN Win Rate Backtest >= 75% (dengan minimal 2 sampel)
             if has_signal and score >= 85 and total_trades >= 2 and win_rate >= 75.0:
                 risk = current_price - sl
                 reward = tp - current_price
                 rr = reward / risk if risk > 0 else 0
                 
                 ticker_name = symbol.replace(".JK", "")
-                signals.append(f"⭐ *{ticker_name}* (Score: {score} | WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
+                signals.append(f"🎯 *{ticker_name}* (Score: {score} | Backtest 2024 WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
                 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
     if signals:
-        message = "💎 **ELITE SIGNALS (Score >= 85 & Win Rate >= 75%)** 💎\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Pastikan cek chart manual sebelum eksekusi!_"
+        message = "🚀 **SWING SIGNALS (Backtest from Jan 2024 | Score >= 85 | WR >= 75%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Diuji berdasarkan rekam jejak historis sejak Januari 2024._"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang mencapai Score >= 85 dan Win Rate >= 75% hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria backtest sejak Januari 2024 hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
