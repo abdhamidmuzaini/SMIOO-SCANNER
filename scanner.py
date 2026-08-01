@@ -33,7 +33,7 @@ def send_telegram_message(message):
 
 def main():
   report = (
-      '🚀 *Top Sinyal Saham (SMIOO GC + AI Historical Win Rate Rank):*\n\n'
+      '🚀 *Top Sinyal Saham (SMIOO GC + AI Validated Win Rate):*\n\n'
   )
 
   try:
@@ -50,8 +50,9 @@ def main():
       ticker += '.JK'
 
     try:
-      df = yf.download(ticker, period='6mo', interval='1d', progress=False)
-      if df.empty or len(df) < 50:
+      # Tarik data 1 tahun penuh untuk sampel backtest yang lebih kaya
+      df = yf.download(ticker, period='1y', interval='1d', progress=False)
+      if df.empty or len(df) < 100:
         continue
 
       if isinstance(df.columns, pd.MultiIndex):
@@ -129,7 +130,7 @@ def main():
       tp_pct = ((tp_price - last_close) / last_close) * 100
       sl_pct = ((last_close - sl_price) / last_close) * 100
 
-      # ---- AI BACKTEST / EVALUASI WIN RATE HISTORIS ----
+      # ---- AI BACKTEST 1 TAHUN KE BELAKANG ----
       past_wins = 0
       past_losses = 0
       for i in range(50, len(df) - 14):
@@ -207,7 +208,12 @@ def main():
               past_losses += 1
 
       total_trades = past_wins + past_losses
-      win_rate = (past_wins / total_trades * 100) if total_trades > 0 else 50.0
+
+      # VALIDASI KETAT: Minimal harus ada 2 sampel uji masa lalu agar layak masuk ranking
+      if total_trades < 2:
+        continue
+
+      win_rate = (past_wins / total_trades) * 100
 
       valid_signals.append({
           'ticker': ticker.replace('.JK', ''),
@@ -224,21 +230,21 @@ def main():
     except Exception as e:
       continue
 
-  # Urutkan berdasarkan Win Rate historis tertinggi
-  valid_signals.sort(key=lambda x: x['win_rate'], reverse=True)
+  # Urutkan berdasarkan Win Rate tertinggi, lalu jumlah sampel terbanyak
+  valid_signals.sort(key=lambda x: (x['win_rate'], x['trades']), reverse=True)
 
-  # Ambil Top 2 terbaik saja
+  # Ambil Top 2 terbaik
   top_signals = valid_signals[:2]
 
   if not top_signals:
     report += (
-        'Belum ada emiten yang lolos kriteria AI Win Rate hari'
+        'Belum ada emiten dengan sampel historis AI yang cukup hari'
         ' ini. *Cash is King!*'
     )
   else:
     for sig in top_signals:
       report += f"📌 *{sig['ticker']}* (Harga: Rp {sig['price']})\n"
-      report += f"   • AI Win Rate Historis: *{sig['win_rate']:.1f}%* ({sig['trades']} sampel uji masa lalu)\n"
+      report += f"   • AI Win Rate: *{sig['win_rate']:.1f}%* (Dari {sig['trades']} sampel uji setahun)\n"
       report += f"   • Kenaikan Harian: +{sig['candle_pct']:.1f}%\n"
       report += f"   • TP: Rp {sig['tp_price']} (+{sig['tp_pct']:.1f}%)\n"
       report += f"   • SL: Rp {sig['sl_price']} (-{sig['sl_pct']:.1f}%)\n\n"
