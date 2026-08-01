@@ -2,8 +2,8 @@ name: Daily Stock Scanner
 
 on:
   schedule:
-    # Berjalan otomatis Senin - Jumat jam 08:30 WIB (01:30 UTC)
-    - cron: '30 1 * * 1-5'
+    # Berjalan otomatis Senin - Jumat jam 16:50 WITA (08:50 UTC)
+    - cron: '50 8 * * 1-5'
   workflow_dispatch: # Biar bisa ditrigger manual lewat web GitHub
 
 jobs:
