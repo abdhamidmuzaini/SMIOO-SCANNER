@@ -18,7 +18,6 @@ def send_telegram(message):
         print(f"Gagal kirim telegram: {e}")
 
 def calculate_dynamic_tp_sl(df, current_price):
-    """Menghitung Stop Loss dan Take Profit dinamis berdasarkan ATR (Volatility)"""
     try:
         high = df['High']
         low = df['Low']
@@ -31,11 +30,9 @@ def calculate_dynamic_tp_sl(df, current_price):
         atr = tr.rolling(window=14).mean().iloc[-1]
         
         if pd.isna(atr) or atr <= 0:
-            # Fallback jika data kurang
             sl = current_price * 0.95
             tp = current_price * 1.10
         else:
-            # Stop Loss 1.5 x ATR di bawah harga, Take Profit 3 x ATR di atas harga
             sl = current_price - (1.5 * atr)
             tp = current_price + (3.0 * atr)
             
@@ -43,34 +40,58 @@ def calculate_dynamic_tp_sl(df, current_price):
     except Exception:
         return round(current_price * 0.95, 2), round(current_price * 1.10, 2)
 
+def load_tickers():
+    """Membaca daftar ratusan saham dari tickers.txt secara fleksibel (Newline, Koma, atau Spasi)"""
+    tickers_list = []
+    try:
+        if os.path.exists('tickers.txt'):
+            with open('tickers.txt', 'r') as f:
+                content = f.read()
+            
+            # Bersihkan karakter aneh lalu pisahkan berdasarkan baris, koma, atau spasi
+            cleaned = content.replace(',', ' ').replace('\n', ' ')
+            tokens = cleaned.split()
+            
+            for t in tokens:
+                clean_t = t.strip().upper()
+                if clean_t and clean_t not in tickers_list:
+                    tickers_list.append(clean_t)
+    except Exception as e:
+        print(f"Gagal baca tickers.txt: {e}")
+        
+    return tickers_list
+
 def run_scanner():
-    # Daftar contoh saham LQ45 / pilihan untuk di-scan (bisa disesuaikan list lu)
-    tickers = ["BBCA.JK", "BBRI.JK", "BMRI.JK", "BBNI.JK", "ADRO.JK", "PTBA.JK", "ANTM.JK", "GOTO.JK", "ASII.JK", "UNVR.JK"]
-    
+    raw_tickers = load_tickers()
+    if not raw_tickers:
+        print("File tickers.txt kosong atau tidak terbaca.")
+        return
+        
+    tickers = [t + ".JK" for t in raw_tickers]
     signals = []
     
     for symbol in tickers:
         try:
-            df = yf.Ticker(symbol).history(period="3mo")
-            if len(df) < 20:
+            ticker_obj = yf.Ticker(symbol)
+            df = ticker_obj.history(period="3mo")
+            if df is None or len(df) < 20:
                 continue
                 
-            # Contoh logika sederhana Sinyal Swing (MA Cross / Momentum)
             df['MA20'] = df['Close'].rolling(window=20).mean()
-            current_price = df['Close'].iloc[-1]
-            prev_price = df['Close'].iloc[-2]
-            ma20 = df['MA20'].iloc[-1]
+            current_price = float(df['Close'].iloc[-1])
+            prev_price = float(df['Close'].iloc[-2])
+            ma20 = float(df['MA20'].iloc[-1])
+            prev_ma20 = float(df['MA20'].iloc[-2])
             
-            # Syarat Sinyal: Harga menembus ke atas MA20 atau kondisi momentum tertentu
-            if prev_price < df['MA20'].iloc[-2] and current_price > ma20:
-                ticker_name = symbol.replace(".JK", "")
-                sl, tp = calculate_dynamic_tp_sl(df, current_price)
-                
-                signals.append(f"🔹 *{ticker_name}*\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 Stop Loss: {sl}\n  • 🟢 Take Profit: {tp}")
+            # Filter Range Harga Opsional (sesuaikan jika perlu, misal 70 sampai 10000)
+            if 70 <= current_price <= 10000:
+                if prev_price <= prev_ma20 and current_price > ma20:
+                    ticker_name = symbol.replace(".JK", "")
+                    sl, tp = calculate_dynamic_tp_sl(df, current_price)
+                    signals.append(f"🔹 *{ticker_name}*\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 Stop Loss: {sl}\n  • 🟢 Take Profit: {tp}")
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    # Kirim hasil ke Telegram
     if signals:
         message = "🚨 **SWING DYNAMIC SIGNAL** 🚨\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Cek manual chart sebelum eksekusi!_"
         send_telegram(message)
