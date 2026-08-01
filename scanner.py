@@ -86,7 +86,7 @@ def evaluate_stock_adaptive(df):
                     
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
         
-        # --- CEK KONDISI HARI INI (Diperluas: Cek 3 hari terakhir ada cross atau sedang uptrend) ---
+        # Cek kondisi teknikal dalam 3 hari terakhir
         recent_cross = False
         for k in range(1, 4):
             if len(df) > k + 1:
@@ -118,7 +118,7 @@ def evaluate_stock_adaptive(df):
         reward = tp_today - current_price
         rr = reward / risk if risk > 0 else 0
         
-        # --- SKORING TEKNIKAL HARI INI (Maks 100) ---
+        # Skoring Teknikal Harian (Maks 100)
         score = 0
         if recent_cross:
             score += 30
@@ -165,7 +165,7 @@ def run_scanner():
         return
         
     tickers = [t + ".JK" for t in raw_tickers]
-    signals = []
+    candidates = []
     
     for symbol in tickers:
         try:
@@ -183,23 +183,43 @@ def run_scanner():
                 
             has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock_adaptive(df)
             
-            # AMBANG BATAS IDEAL: Score >= 70 dan Win Rate >= 60%
-            if has_signal and score >= 70 and total_trades >= 1 and win_rate >= 60.0:
+            # Filter Ambang Batas Minimum
+            if has_signal and score >= 70 and total_trades >= 2 and win_rate >= 60.0:
                 risk = current_price - sl
                 reward = tp - current_price
                 rr = reward / risk if risk > 0 else 0
                 
                 ticker_name = symbol.replace(".JK", "")
-                signals.append(f"🎯 *{ticker_name}* (Score: {score} | Backtest WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
+                
+                # Simpan ke dalam list kandidat untuk di-sorting
+                candidates.append({
+                    'symbol': ticker_name,
+                    'score': score,
+                    'win_rate': win_rate,
+                    'price': current_price,
+                    'sl': sl,
+                    'tp': tp,
+                    'rr': rr
+                })
                 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    if signals:
-        message = "🚀 **SMIOO SWING SIGNALS (Score >= 70 | WR >= 60%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Saham pilihan dengan rekam jejak historis dan tren swing aktif._"
+    if candidates:
+        # --- MACHINE LEARNING RANKING: Urutkan berdasarkan Win Rate tertinggi, lalu Skor tertinggi ---
+        candidates.sort(key=lambda x: (x['win_rate'], x['score']), reverse=True)
+        
+        # Ambil HANYA 2 emiten teratas terbaik hari ini
+        top_candidates = candidates[:2]
+        
+        signals = []
+        for item in top_candidates:
+            signals.append(f"🔥 *{item['symbol']}* (Backtest WR: {item['win_rate']:.0f}% | Score: {item['score']} | RR: {item['rr']:.1f})\n  • Harga Masuk: {item['price']:.0f}\n  • 🔴 SL: {item['sl']}\n  • 🟢 TP: {item['tp']}")
+            
+        message = "🏆 **TOP-2 ELITE SWING SIGNALS (Highest Win Rate)** 🏆\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Dua pilihan terbaik yang disaring otomatis berdasarkan rekam jejak historis tertinggi._"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang memenuhi kriteria swing hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria top ranking hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
