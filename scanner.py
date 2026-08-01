@@ -67,7 +67,6 @@ def evaluate_stock_adaptive(df):
                 sl, tp = calculate_dynamic_tp_sl(df, i)
                 trade_win = False
                 
-                # Simulasi swing hingga 30 hari ke depan
                 for j in range(1, 31):
                     if i + j >= len(df):
                         break
@@ -154,7 +153,6 @@ def run_scanner():
     
     for symbol in tickers:
         try:
-            # Tarik data historis mutlak mulai dari 1 Januari 2024
             ticker_obj = yf.Ticker(symbol)
             df = ticker_obj.history(start="2024-01-01")
             if df is None or len(df) < 60:
@@ -168,22 +166,23 @@ def run_scanner():
                 
             has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock_adaptive(df)
             
-            if has_signal and score >= 85 and total_trades >= 2 and win_rate >= 75.0:
+            # AMBANG BATAS DILONGGARKAN: Score >= 75 dan Win Rate >= 65%
+            if has_signal and score >= 75 and total_trades >= 1 and win_rate >= 65.0:
                 risk = current_price - sl
                 reward = tp - current_price
                 rr = reward / risk if risk > 0 else 0
                 
                 ticker_name = symbol.replace(".JK", "")
-                signals.append(f"🎯 *{ticker_name}* (Score: {score} | Backtest 2024 WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
+                signals.append(f"🎯 *{ticker_name}* (Score: {score} | Backtest WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
                 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
     if signals:
-        message = "🚀 **SWING SIGNALS (Backtest from Jan 2024 | Score >= 85 | WR >= 75%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Diuji berdasarkan rekam jejak historis sejak Januari 2024._"
+        message = "🚀 **BALANCED SWING SIGNALS (Score >= 75 | WR >= 65%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Sinyal terseleksi dengan parameter yang lebih realistis._"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang memenuhi kriteria backtest sejak Januari 2024 hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria balanced screener hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
