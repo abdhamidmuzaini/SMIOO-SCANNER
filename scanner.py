@@ -17,7 +17,7 @@ def send_telegram(message):
     except Exception as e:
         print(f"Gagal kirim telegram: {e}")
 
-def calculate_dynamic_tp_sl(df, idx, holding_days=30):
+def calculate_dynamic_tp_sl(df, idx, holding_days=10):
     try:
         high = df['High'].iloc[:idx+1]
         low = df['Low'].iloc[:idx+1]
@@ -30,12 +30,19 @@ def calculate_dynamic_tp_sl(df, idx, holding_days=30):
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=14).mean().iloc[-1]
         
-        # Penyesuaian TP/SL adaptif berdasarkan durasi holding
-        multiplier = 2.0 if holding_days <= 20 else 2.5
-        tp_target = 1.10 if holding_days <= 20 else 1.15
-        
+        # Penyesuaian TP/SL cepat (Fast Swing: 7 - 14 Hari)
+        if holding_days <= 7:
+            multiplier = 1.5
+            tp_target = 1.06  # Target profit ~6%
+        elif holding_days <= 10:
+            multiplier = 1.8
+            tp_target = 1.08  # Target profit ~8%
+        else:
+            multiplier = 2.0
+            tp_target = 1.10  # Target profit ~10%
+            
         if pd.isna(atr) or atr <= 0:
-            sl = current_price * 0.93
+            sl = current_price * 0.97
             tp = current_price * tp_target
         else:
             sl = current_price - (multiplier * atr)
@@ -44,12 +51,12 @@ def calculate_dynamic_tp_sl(df, idx, holding_days=30):
         return round(sl, 2), round(tp, 2)
     except Exception:
         cp = float(df['Close'].iloc[idx])
-        return round(cp * 0.93, 2), round(cp * 1.15, 2)
+        return round(cp * 0.97, 2), round(cp * 1.08, 2)
 
 def evaluate_stock_ml_adaptive(df):
     try:
         if len(df) < 60:
-            return False, 0, 0, 30, 0, 0, 0, 0
+            return False, 0, 0, 10, 0, 0, 0, 0
             
         df['SMIOO_Blue'] = df['Close'].ewm(span=12, adjust=False).mean()
         df['SMIOO_Orange'] = df['SMIOO_Blue'].ewm(span=9, adjust=False).mean()
@@ -57,17 +64,17 @@ def evaluate_stock_ml_adaptive(df):
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         
-        # --- MACHINE LEARNING: Uji Coba Berbagai Opsi Holding Period (15, 30, 45 Hari) ---
-        candidate_holding_periods = [15, 30, 45]
+        # --- MACHINE LEARNING: Uji Coba Durasi Fast Swing (7, 10, 14 Hari) ---
+        candidate_holding_periods = [7, 10, 14]
         best_win_rate = -1
-        best_holding_period = 30
+        best_holding_period = 10
         best_total_trades = 0
         
         for hp in candidate_holding_periods:
             wins = 0
             total_trades = 0
             
-            # Backtest historis dari Jan 2024 dengan mempertimbangkan batas holding period
+            # Backtest historis dengan batasan holding period pendek
             for i in range(30, len(df) - hp):
                 b_prev = df['SMIOO_Blue'].iloc[i-1]
                 b_curr = df['SMIOO_Blue'].iloc[i]
@@ -96,16 +103,15 @@ def evaluate_stock_ml_adaptive(df):
                         wins += 1
                         
             wr = (wins / total_trades * 100) if total_trades > 0 else 0
-            # Pilih holding period yang menghasilkan Win Rate paling optimal
+            # Pilih durasi dengan Win Rate paling optimal
             if wr > best_win_rate and total_trades >= 2:
                 best_win_rate = wr
                 best_holding_period = hp
                 best_total_trades = total_trades
                 
-        # Jika tidak ada sampel yang cukup di semua periode, beri default
         if best_win_rate == -1:
             best_win_rate = 60.0
-            best_holding_period = 30
+            best_holding_period = 10
             best_total_trades = 1
             
         # --- CEK KONDISI TEKNIKAL HARI INI ---
@@ -126,7 +132,7 @@ def evaluate_stock_ml_adaptive(df):
         is_bullish_trend = (blue_today > orange_today) and (blue_today > blue_prev)
         
         if not (recent_cross or is_bullish_trend):
-            return False, 0, 0, 30, 0, 0, 0, 0
+            return False, 0, 0, 10, 0, 0, 0, 0
             
         current_price = float(df['Close'].iloc[-1])
         ma5 = float(df['MA5'].iloc[-1])
@@ -134,7 +140,6 @@ def evaluate_stock_ml_adaptive(df):
         vol_today = float(df['Volume'].iloc[-1])
         vol_ma20 = float(df['Vol_MA20'].iloc[-1])
         
-        # Hitung SL & TP berdasarkan holding period terbaik hasil pembelajaran mandiri
         sl_today, tp_today = calculate_dynamic_tp_sl(df, len(df)-1, best_holding_period)
         risk = current_price - sl_today
         reward = tp_today - current_price
@@ -159,7 +164,7 @@ def evaluate_stock_ml_adaptive(df):
             
         return True, score, best_win_rate, best_holding_period, best_total_trades, sl_today, tp_today, rr
     except Exception:
-        return False, 0, 0, 30, 0, 0, 0, 0
+        return False, 0, 0, 10, 0, 0, 0, 0
 
 def load_tickers():
     tickers_list = []
@@ -202,7 +207,7 @@ def run_scanner():
                 
             has_signal, score, win_rate, holding_days, total_trades, sl, tp, rr = evaluate_stock_ml_adaptive(df)
             
-            # FILTER KETAT: Score >= 70, WR >= 60%, DAN Rasio RR wajib >= 1.5
+            # FILTER FAST SWING: Score >= 70, WR >= 60%, DAN RR >= 1.5
             if has_signal and score >= 70 and total_trades >= 1 and win_rate >= 60.0 and rr >= 1.5:
                 ticker_name = symbol.replace(".JK", "")
                 candidates.append({
@@ -220,20 +225,20 @@ def run_scanner():
             print(f"Error processing {symbol}: {e}")
 
     if candidates:
-        # --- MACHINE LEARNING SORTING: Urutkan berdasarkan Win Rate tertinggi, lalu Skor tertinggi ---
+        # Urutkan berdasarkan Win Rate tertinggi, lalu Skor tertinggi
         candidates.sort(key=lambda x: (x['win_rate'], x['score']), reverse=True)
         
-        # Ambil HANYA 2 emiten teratas terbaik hasil optimasi mandiri
+        # Ambil Top 2 Elite Picks
         top_candidates = candidates[:2]
         
         signals = []
         for item in top_candidates:
-            signals.append(f"🤖 *{item['symbol']}* (ML WR: {item['win_rate']:.0f}% | Hold: ~{item['holding_days']} Hari | RR: {item['rr']:.1f})\n  • Harga Masuk: {item['price']:.0f}\n  • 🔴 SL: {item['sl']}\n  • 🟢 TP: {item['tp']}")
+            signals.append(f"⚡ *{item['symbol']}* (ML WR: {item['win_rate']:.0f}% | Hold: ~{item['holding_days']} Hari | RR: {item['rr']:.1f})\n  • Harga Masuk: {item['price']:.0f}\n  • 🔴 SL: {item['sl']}\n  • 🟢 TP: {item['tp']}")
             
-        message = "🧠 **AI DYNAMIC SWING SIGNALS (Machine Learning Optimized)** 🧠\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Disaring otomatis dengan durasi holding optimal & RR >= 1.5._"
+        message = "🚀 **FAST SWING AI SIGNALS (7-14 Days Target)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Disaring otomatis dengan durasi singkat (7-14 hari) & RR >= 1.5._"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang memenuhi kriteria ML dynamic optimization hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria fast swing hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
