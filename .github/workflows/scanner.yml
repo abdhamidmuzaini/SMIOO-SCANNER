@@ -1,0 +1,30 @@
+name: Daily Stock Scanner
+
+on:
+  schedule:
+    # Berjalan otomatis Senin - Jumat jam 08:30 WIB (01:30 UTC)
+    - cron: '30 1 * * 1-5'
+  workflow_dispatch: # Biar bisa ditrigger manual lewat web GitHub
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas requests numpy
+
+      - name: Run scanner script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python scanner.py
