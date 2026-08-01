@@ -17,11 +17,12 @@ def send_telegram(message):
     except Exception as e:
         print(f"Gagal kirim telegram: {e}")
 
-def calculate_dynamic_tp_sl(df, current_price):
+def calculate_dynamic_tp_sl(df, idx):
     try:
-        high = df['High']
-        low = df['Low']
-        close = df['Close']
+        high = df['High'].iloc[:idx+1]
+        low = df['Low'].iloc[:idx+1]
+        close = df['Close'].iloc[:idx+1]
+        current_price = float(close.iloc[-1])
         
         tr1 = high - low
         tr2 = np.abs(high - close.shift(1))
@@ -38,7 +39,92 @@ def calculate_dynamic_tp_sl(df, current_price):
             
         return round(sl, 2), round(tp, 2)
     except Exception:
-        return round(current_price * 0.95, 2), round(current_price * 1.10, 2)
+        cp = float(df['Close'].iloc[idx])
+        return round(cp * 0.95, 2), round(cp * 1.10, 2)
+
+def evaluate_stock(df):
+    try:
+        if len(df) < 60:
+            return False, 0, 0, 0, 0, 0
+            
+        # Indikator Utama
+        df['SMIOO_Blue'] = df['Close'].ewm(span=12, adjust=False).mean()
+        df['SMIOO_Orange'] = df['SMIOO_Blue'].ewm(span=9, adjust=False).mean()
+        df['MA5'] = df['Close'].rolling(window=5).mean()
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+        
+        # --- 1. BACKTEST HISTORIS (Win Rate) ---
+        wins = 0
+        total_trades = 0
+        
+        for i in range(30, len(df) - 10):
+            b_prev = df['SMIOO_Blue'].iloc[i-1]
+            b_curr = df['SMIOO_Blue'].iloc[i]
+            o_prev = df['SMIOO_Orange'].iloc[i-1]
+            o_curr = df['SMIOO_Orange'].iloc[i]
+            
+            if (b_prev <= o_prev) and (b_curr > o_curr) and (b_curr > b_prev):
+                sl, tp = calculate_dynamic_tp_sl(df, i)
+                trade_win = False
+                for j in range(1, 11):
+                    if i + j >= len(df):
+                        break
+                    high_future = float(df['High'].iloc[i+j])
+                    low_future = float(df['Low'].iloc[i+j])
+                    if high_future >= tp:
+                        trade_win = True
+                        break
+                    if low_future <= sl:
+                        trade_win = False
+                        break
+                total_trades += 1
+                if trade_win:
+                    wins += 1
+                    
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        
+        # --- 2. CEK KONDISI HARI INI ---
+        current_price = float(df['Close'].iloc[-1])
+        b_prev_today = df['SMIOO_Blue'].iloc[-2]
+        b_curr_today = df['SMIOO_Blue'].iloc[-1]
+        o_prev_today = df['SMIOO_Orange'].iloc[-2]
+        o_curr_today = df['SMIOO_Orange'].iloc[-1]
+        
+        is_crossover = (b_prev_today <= o_prev_today) and (b_curr_today > o_curr_today)
+        is_slope_up = b_curr_today > b_prev_today
+        
+        if not (is_crossover and is_slope_up):
+            return False, 0, 0, 0, 0, 0
+            
+        # --- 3. SKORING TEKNIKAL HARI INI (Maks 100) ---
+        ma5 = float(df['MA5'].iloc[-1])
+        ma20 = float(df['MA20'].iloc[-1])
+        vol_today = float(df['Volume'].iloc[-1])
+        vol_ma20 = float(df['Vol_MA20'].iloc[-1])
+        
+        sl_today, tp_today = calculate_dynamic_tp_sl(df, len(df)-1)
+        risk = current_price - sl_today
+        reward = tp_today - current_price
+        rr = reward / risk if risk > 0 else 0
+        
+        score = 0
+        if is_crossover and is_slope_up:
+            score += 30
+        if current_price > ma5 and current_price > ma20:
+            score += 25
+        elif current_price > ma20:
+            score += 15
+        if vol_today > vol_ma20:
+            score += 25
+        if rr >= 2.0:
+            score += 20
+        elif rr >= 1.5:
+            score += 10
+            
+        return True, score, win_rate, total_trades, sl_today, tp_today
+    except Exception:
+        return False, 0, 0, 0, 0, 0
 
 def load_tickers():
     tickers_list = []
@@ -68,83 +154,36 @@ def run_scanner():
     for symbol in tickers:
         try:
             ticker_obj = yf.Ticker(symbol)
-            df = ticker_obj.history(period="3mo")
-            if df is None or len(df) < 30:
+            df = ticker_obj.history(period="6mo")
+            if df is None or len(df) < 60:
                 continue
                 
-            # Indikator Teknikal & Likuiditas
-            df['SMIOO_Blue'] = df['Close'].ewm(span=12, adjust=False).mean()
-            df['SMIOO_Orange'] = df['SMIOO_Blue'].ewm(span=9, adjust=False).mean()
-            df['MA5'] = df['Close'].rolling(window=5).mean()
-            df['MA20'] = df['Close'].rolling(window=20).mean()
-            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-            df['Value_MA20'] = (df['Close'] * df['Volume']).rolling(window=20).mean()
-            
             current_price = float(df['Close'].iloc[-1])
-            blue_today = float(df['SMIOO_Blue'].iloc[-1])
-            blue_prev = float(df['SMIOO_Blue'].iloc[-2])
-            orange_today = float(df['SMIOO_Orange'].iloc[-1])
-            orange_prev = float(df['SMIOO_Orange'].iloc[-2])
+            val_ma20 = float((df['Close'] * df['Volume']).rolling(window=20).mean().iloc[-1])
             
-            ma5 = float(df['MA5'].iloc[-1])
-            ma20 = float(df['MA20'].iloc[-1])
-            vol_today = float(df['Volume'].iloc[-1])
-            vol_ma20 = float(df['Vol_MA20'].iloc[-1])
-            val_ma20 = float(df['Value_MA20'].iloc[-1])
-            
-            # 1. Filter Wajib Utama (Harga & Likuiditas)
-            cond_price = 70 <= current_price < 1000
-            cond_value = val_ma20 > 2_000_000_000
-            
-            if not (cond_price and cond_value):
+            # Filter Dasar: Harga (70 - <1000) & Transaksi (>2 Miliar)
+            if not (70 <= current_price < 1000 and val_ma20 > 2_000_000_000):
                 continue
                 
-            # Hitung TP, SL, dan Risk/Reward (RR)
-            sl, tp = calculate_dynamic_tp_sl(df, current_price)
-            risk = current_price - sl
-            reward = tp - current_price
-            rr = reward / risk if risk > 0 else 0
+            has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock(df)
             
-            # --- SISTEM SKORING TEKNIKAL (Maksimal 100 Poin) ---
-            score = 0
-            
-            # A. Sinyal SMIOO (Golden Cross & Arah Menanjak / Slope Up) - Bobot: 30 Poin
-            is_crossover = (blue_prev <= orange_prev) and (blue_today > orange_today)
-            is_slope_up = blue_today > blue_prev
-            if is_crossover and is_slope_up:
-                score += 30
-            elif is_slope_up:
-                score += 15 # Masih ada momentum walau belum pas GC hari ini
+            # SYARAT UTAMA: Skor >= 85 DAN Win Rate Backtest >= 75% (dengan minimal 2 sampel)
+            if has_signal and score >= 85 and total_trades >= 2 and win_rate >= 75.0:
+                risk = current_price - sl
+                reward = tp - current_price
+                rr = reward / risk if risk > 0 else 0
                 
-            # B. Konfirmasi Tren Harga (Di atas MA5 & MA20) - Bobot: 25 Poin
-            if current_price > ma5 and current_price > ma20:
-                score += 25
-            elif current_price > ma20:
-                score += 15
-                
-            # C. Lonjakan Volume (Volume > Rata-rata 20 Hari) - Bobot: 25 Poin
-            if vol_today > vol_ma20:
-                score += 25
-                
-            # D. Kualitas Risk / Reward (RR Bagus >= 2.0) - Bobot: 20 Poin
-            if rr >= 2.0:
-                score += 20
-            elif rr >= 1.5:
-                score += 10
-                
-            # --- FILTER FINAL: HANYA LOLOS JIKA SKOR > 70 ---
-            if score > 70:
                 ticker_name = symbol.replace(".JK", "")
-                signals.append(f"🔥 *{ticker_name}* (Score: {score} | RR: {rr:.1f})\n  • Harga: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
+                signals.append(f"⭐ *{ticker_name}* (Score: {score} | WR: {win_rate:.0f}% | RR: {rr:.1f})\n  • Harga: {current_price:.0f}\n  • 🔴 SL: {sl}\n  • 🟢 TP: {tp}")
                 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
     if signals:
-        message = "⭐ **HIGH SCORE SCREENER SIGNAL (Score > 70)** ⭐\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Pastikan cek chart manual sebelum eksekusi!_"
+        message = "💎 **ELITE SIGNALS (Score >= 85 & Win Rate >= 75%)** 💎\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Pastikan cek chart manual sebelum eksekusi!_"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang mencapai Score > 70 hari ini.")
+        print("Tidak ada saham yang mencapai Score >= 85 dan Win Rate >= 75% hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
