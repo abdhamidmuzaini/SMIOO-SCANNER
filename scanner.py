@@ -41,24 +41,19 @@ def calculate_dynamic_tp_sl(df, current_price):
         return round(current_price * 0.95, 2), round(current_price * 1.10, 2)
 
 def load_tickers():
-    """Membaca daftar ratusan saham dari tickers.txt secara fleksibel (Newline, Koma, atau Spasi)"""
     tickers_list = []
     try:
         if os.path.exists('tickers.txt'):
             with open('tickers.txt', 'r') as f:
                 content = f.read()
-            
-            # Bersihkan karakter aneh lalu pisahkan berdasarkan baris, koma, atau spasi
             cleaned = content.replace(',', ' ').replace('\n', ' ')
             tokens = cleaned.split()
-            
             for t in tokens:
                 clean_t = t.strip().upper()
                 if clean_t and clean_t not in tickers_list:
                     tickers_list.append(clean_t)
     except Exception as e:
         print(f"Gagal baca tickers.txt: {e}")
-        
     return tickers_list
 
 def run_scanner():
@@ -74,29 +69,41 @@ def run_scanner():
         try:
             ticker_obj = yf.Ticker(symbol)
             df = ticker_obj.history(period="3mo")
-            if df is None or len(df) < 20:
+            if df is None or len(df) < 30:
                 continue
                 
-            df['MA20'] = df['Close'].rolling(window=20).mean()
-            current_price = float(df['Close'].iloc[-1])
-            prev_price = float(df['Close'].iloc[-2])
-            ma20 = float(df['MA20'].iloc[-1])
-            prev_ma20 = float(df['MA20'].iloc[-2])
+            # --- LOGIKA INDIKATOR SMIOO ---
+            # Garis Biru (Fast Momentum) & Garis Oranye (Signal Line)
+            df['SMIOO_Blue'] = df['Close'].ewm(span=12, adjust=False).mean()
+            df['SMIOO_Orange'] = df['SMIOO_Blue'].ewm(span=9, adjust=False).mean()
             
-            # Filter Range Harga Opsional (sesuaikan jika perlu, misal 70 sampai 10000)
+            current_price = float(df['Close'].iloc[-1])
+            
+            blue_today = float(df['SMIOO_Blue'].iloc[-1])
+            blue_prev = float(df['SMIOO_Blue'].iloc[-2])
+            orange_today = float(df['SMIOO_Orange'].iloc[-1])
+            orange_prev = float(df['SMIOO_Orange'].iloc[-2])
+            
+            # 1. Golden Cross: Garis Biru memotong ke atas Garis Oranye
+            is_crossover = (blue_prev <= orange_prev) and (blue_today > orange_today)
+            
+            # 2. Slope Up: Arah garis biru wajib menanjak (hari ini > kemarin)
+            is_slope_up = blue_today > blue_prev
+            
+            # Filter rentang harga (disesuaikan misal 70 - 10000)
             if 70 <= current_price <= 10000:
-                if prev_price <= prev_ma20 and current_price > ma20:
+                if is_crossover and is_slope_up:
                     ticker_name = symbol.replace(".JK", "")
                     sl, tp = calculate_dynamic_tp_sl(df, current_price)
-                    signals.append(f"🔹 *{ticker_name}*\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 Stop Loss: {sl}\n  • 🟢 Take Profit: {tp}")
+                    signals.append(f"🔹 *{ticker_name}* (SMIOO Signal)\n  • Harga Masuk: {current_price:.0f}\n  • 🔴 Stop Loss: {sl}\n  • 🟢 Take Profit: {tp}")
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
     if signals:
-        message = "🚨 **SWING DYNAMIC SIGNAL** 🚨\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Cek manual chart sebelum eksekusi!_"
+        message = "🚨 **SMIOO SIGNAL DETECTED** 🚨\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Cek manual chart sebelum eksekusi!_"
         send_telegram(message)
     else:
-        print("Tidak ada sinyal yang memenuhi kriteria hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria SMIOO hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
