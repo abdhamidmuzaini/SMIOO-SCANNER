@@ -56,14 +56,14 @@ def evaluate_stock_adaptive(df):
         wins = 0
         total_trades = 0
         
-        # Backtest dari awal data (Jan 2024) sampai 30 hari sebelum hari ini
+        # Backtest historis dari Jan 2024
         for i in range(30, len(df) - 30):
             b_prev = df['SMIOO_Blue'].iloc[i-1]
             b_curr = df['SMIOO_Blue'].iloc[i]
             o_prev = df['SMIOO_Orange'].iloc[i-1]
             o_curr = df['SMIOO_Orange'].iloc[i]
             
-            if (b_prev <= o_prev) and (b_curr > o_curr) and (b_curr > b_prev):
+            if (b_prev <= o_prev) and (b_curr > o_curr):
                 sl, tp = calculate_dynamic_tp_sl(df, i)
                 trade_win = False
                 
@@ -86,18 +86,28 @@ def evaluate_stock_adaptive(df):
                     
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
         
-        current_price = float(df['Close'].iloc[-1])
-        b_prev_today = df['SMIOO_Blue'].iloc[-2]
-        b_curr_today = df['SMIOO_Blue'].iloc[-1]
-        o_prev_today = df['SMIOO_Orange'].iloc[-2]
-        o_curr_today = df['SMIOO_Orange'].iloc[-1]
+        # --- CEK KONDISI HARI INI (Diperluas: Cek 3 hari terakhir ada cross atau sedang uptrend) ---
+        recent_cross = False
+        for k in range(1, 4):
+            if len(df) > k + 1:
+                bp = df['SMIOO_Blue'].iloc[-(k+1)]
+                bc = df['SMIOO_Blue'].iloc[-k]
+                op = df['SMIOO_Orange'].iloc[-(k+1)]
+                oc = df['SMIOO_Orange'].iloc[-k]
+                if bp <= op and bc > oc:
+                    recent_cross = True
+                    break
+                    
+        blue_today = df['SMIOO_Blue'].iloc[-1]
+        blue_prev = df['SMIOO_Blue'].iloc[-2]
+        orange_today = df['SMIOO_Orange'].iloc[-1]
         
-        is_crossover = (b_prev_today <= o_prev_today) and (b_curr_today > o_curr_today)
-        is_slope_up = b_curr_today > b_prev_today
+        is_bullish_trend = (blue_today > orange_today) and (blue_today > blue_prev)
         
-        if not (is_crossover and is_slope_up):
+        if not (recent_cross or is_bullish_trend):
             return False, 0, 0, 0, 0, 0
             
+        current_price = float(df['Close'].iloc[-1])
         ma5 = float(df['MA5'].iloc[-1])
         ma20 = float(df['MA20'].iloc[-1])
         vol_today = float(df['Volume'].iloc[-1])
@@ -108,15 +118,21 @@ def evaluate_stock_adaptive(df):
         reward = tp_today - current_price
         rr = reward / risk if risk > 0 else 0
         
+        # --- SKORING TEKNIKAL HARI INI (Maks 100) ---
         score = 0
-        if is_crossover and is_slope_up:
+        if recent_cross:
             score += 30
+        elif is_bullish_trend:
+            score += 20
+            
         if current_price > ma5 and current_price > ma20:
             score += 25
         elif current_price > ma20:
             score += 15
+            
         if vol_today > vol_ma20:
             score += 25
+            
         if rr >= 2.0:
             score += 20
         elif rr >= 1.5:
@@ -161,13 +177,14 @@ def run_scanner():
             current_price = float(df['Close'].iloc[-1])
             val_ma20 = float((df['Close'] * df['Volume']).rolling(window=20).mean().iloc[-1])
             
+            # Filter Dasar: Harga 70 - <1000 & Transaksi > 2 Miliar
             if not (70 <= current_price < 1000 and val_ma20 > 2_000_000_000):
                 continue
                 
             has_signal, score, win_rate, total_trades, sl, tp = evaluate_stock_adaptive(df)
             
-            # AMBANG BATAS DILONGGARKAN: Score >= 75 dan Win Rate >= 65%
-            if has_signal and score >= 75 and total_trades >= 1 and win_rate >= 65.0:
+            # AMBANG BATAS IDEAL: Score >= 70 dan Win Rate >= 60%
+            if has_signal and score >= 70 and total_trades >= 1 and win_rate >= 60.0:
                 risk = current_price - sl
                 reward = tp - current_price
                 rr = reward / risk if risk > 0 else 0
@@ -179,10 +196,10 @@ def run_scanner():
             print(f"Error processing {symbol}: {e}")
 
     if signals:
-        message = "🚀 **BALANCED SWING SIGNALS (Score >= 75 | WR >= 65%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Sinyal terseleksi dengan parameter yang lebih realistis._"
+        message = "🚀 **SMIOO SWING SIGNALS (Score >= 70 | WR >= 60%)** 🚀\n📅 *Tanggal:* Hari Ini\n\n" + "\n\n".join(signals) + "\n\n_Saham pilihan dengan rekam jejak historis dan tren swing aktif._"
         send_telegram(message)
     else:
-        print("Tidak ada saham yang memenuhi kriteria balanced screener hari ini.")
+        print("Tidak ada saham yang memenuhi kriteria swing hari ini.")
 
 if __name__ == "__main__":
     run_scanner()
