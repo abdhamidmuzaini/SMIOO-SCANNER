@@ -1,256 +1,154 @@
 import os
 import requests
-import numpy as np
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
-# Konfigurasi Telegram
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHAT_ID = os.environ.get('CHAT_ID')
-
+# ==========================================
+# KONFIGURASI TELEGRAM & TARGET
+# ==========================================
+# Token & Chat ID diambil dari GitHub Secrets supaya aman
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def send_telegram_message(message):
-  if not TELEGRAM_TOKEN or not CHAT_ID:
-    print('Token atau Chat ID Telegram belum diset!')
-    return
-  url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-
-  if len(message) > 4000:
-    chunks = [message[i : i + 4000] for i in range(0, len(message), 4000)]
-    for chunk in chunks:
-      requests.post(
-          url, json={'chat_id': CHAT_ID, 'text': chunk, 'parse_mode': 'Markdown'}
-      )
-  else:
-    payload = {'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Token/Chat ID Telegram belum diset di Secrets!")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
     try:
-      response = requests.post(url, json=payload)
-      if response.status_code != 200:
-        print(f'Gagal kirim Telegram: {response.text}')
+        response = requests.post(url, json=payload)
+        if response.status_code != 200:
+            print(f"Gagal kirim Telegram: {response.text}")
     except Exception as e:
-      print(f'Error koneksi Telegram: {e}')
+        print(f"Error koneksi Telegram: {e}")
 
-
-def main():
-  report = (
-      '🚀 *Top Sinyal Saham (SMIOO GC + AI Validated Win Rate):*\n\n'
-  )
-
-  try:
-    with open('tickers.txt', 'r') as f:
-      raw_tickers = [line.strip() for line in f if line.strip()]
-  except FileNotFoundError:
-    raw_tickers = ['BSML', 'ADRO', 'ANTM']
-
-  valid_signals = []
-
-  for raw in raw_tickers:
-    ticker = raw.replace('$', '').strip().upper()
-    if not ticker.endswith('.JK'):
-      ticker += '.JK'
-
+# ==========================================
+# MESIN ANALISIS TEKNIKAL & AI HISTORI
+# ==========================================
+def analyze_stock(ticker):
     try:
-      # Tarik data 1 tahun penuh untuk sampel backtest yang lebih kaya
-      df = yf.download(ticker, period='1y', interval='1d', progress=False)
-      if df.empty or len(df) < 100:
-        continue
+        # Ambil data historis 1 tahun ke belakang
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        if df.empty or len(df) < 50:
+            return None
+        
+        # Bersihkan format multi-index jika ada dari yfinance
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-      if isinstance(df.columns, pd.MultiIndex):
-        close = df['Close'].iloc[:, 0]
-        open_p = df['Open'].iloc[:, 0]
-        high = df['High'].iloc[:, 0]
-        low = df['Low'].iloc[:, 0]
-        volume = df['Volume'].iloc[:, 0]
-      else:
         close = df['Close']
-        open_p = df['Open']
         high = df['High']
         low = df['Low']
         volume = df['Volume']
 
-      last_close = float(close.iloc[-1])
-      last_open = float(open_p.iloc[-1])
+        # 1. FILTER LIKUIDITAS (Anti-Nyangkut: Nilai transaksi rata-rata 20 hari min Rp 1 Miliar)
+        value_txn = close * volume
+        avg_value_20 = value_txn.rolling(window=20).mean().iloc[-1]
+        if avg_value_20 < 1_000_000_000: # Di bawah 1 Miliar skip!
+            return None
 
-      # 1. Filter Rentang Harga: 70 - 1000
-      if not (70 <= last_close <= 1000):
-        continue
+        # 2. FILTER HARGA & RATA-RATA HARIAN
+        last_close = float(close.iloc[-1])
+        prev_close = float(close.iloc[-2])
+        
+        # Syarat harga di bawah 2000 (sesuai gaya lu) dan candle hijau
+        if last_close > 2000 or last_close <= prev_close:
+            return None
 
-      # 2. Filter Transaksi 20 Hari > 2 Miliar
-      traded_value = close * volume
-      avg_value_20 = traded_value.rolling(window=20).mean().iloc[-1]
-      if avg_value_20 < 2_000_000_000:
-        continue
+        # 3. INDIKATOR BOLLINGER BANDS (Periode 20, Dev 2)
+        sma_20 = close.rolling(window=20).mean()
+        std_20 = close.rolling(window=20).std()
+        upper_band = sma_20 + (std_20 * 2)
+        
+        # Kondisi: Hari ini tembus / menyentuh Upper Band
+        if last_close < float(upper_band.iloc[-1]):
+            return None
 
-      # 3. Candle Bullish: C > O minimal 3%
-      candle_pct = ((last_close - last_open) / last_open) * 100
-      if candle_pct < 3.0:
-        continue
+        # 4. SIMULASI AI HISTORIS (Backtest Pola Close-to-High P1-P5)
+        # Menghitung seberapa sering dalam setahun terakhir saham ini naik min 3% dalam 5 hari ke depan
+        success_count = 0
+        total_signals = 0
+        
+        for i in range(20, len(df) - 5):
+            # Cek apakah pola mirip terjadi di masa lalu
+            if float(close.iloc[i]) > float(upper_band.iloc[i]):
+                total_signals += 1
+                future_slice = high.iloc[i+1:i+6] # Cek 5 hari kedepan (P1 - P5)
+                target_price = float(close.iloc[i]) * 1.035 # Target +3.5%
+                
+                if (future_slice >= target_price).any():
+                    success_count += 1
 
-      # 4. Harga > MA5
-      ma5 = close.rolling(window=5).mean().iloc[-1]
-      if last_close <= ma5:
-        continue
+        # Hitung Win Rate Historis
+        win_rate = int((success_count / total_signals) * 100) if total_signals > 0 else 50
+        
+        # Filter ketat: Hanya ambil yang Win Rate historisnya >= 75%
+        if win_rate < 75:
+            return None
 
-      # 5. Indikator SMIOO Golden Cross (GC) hari ini
-      high_n = high.rolling(14).max()
-      low_n = low.rolling(14).min()
-      midpoint = (high_n + low_n) / 2
-      diff = close - midpoint
-      ema2_diff = (
-          diff.ewm(span=3, adjust=False).mean().ewm(span=3, adjust=False).mean()
-      )
-      ema2_hl = (
-          (high_n - low_n)
-          .ewm(span=3, adjust=False)
-          .mean()
-          .ewm(span=3, adjust=False)
-          .mean()
-      )
+        target_tp = round(last_close * 1.035)
 
-      smioo = (ema2_diff / (ema2_hl / 2)) * 100
-      smioo_signal = smioo.ewm(span=4, adjust=False).mean()
-
-      if len(smioo) < 2:
-        continue
-      is_gc = (smioo.iloc[-1] > smioo_signal.iloc[-1]) and (
-          smioo.iloc[-2] <= smioo_signal.iloc[-2]
-      )
-      if not is_gc:
-        continue
-
-      # Hitung ATR & TP/SL hari ini
-      tr1 = high - low
-      tr2 = abs(high - close.shift())
-      tr3 = abs(low - close.shift())
-      tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-      atr = tr.rolling(14).mean().iloc[-1]
-
-      tp_price = last_close + (1.5 * atr)
-      sl_price = last_close - (1.0 * atr)
-      tp_pct = ((tp_price - last_close) / last_close) * 100
-      sl_pct = ((last_close - sl_price) / last_close) * 100
-
-      # ---- AI BACKTEST 1 TAHUN KE BELAKANG ----
-      past_wins = 0
-      past_losses = 0
-      for i in range(50, len(df) - 14):
-        h_sub = high.iloc[: i + 1]
-        l_sub = low.iloc[: i + 1]
-        c_sub = close.iloc[: i + 1]
-        o_sub = open_p.iloc[: i + 1]
-        v_sub = volume.iloc[: i + 1]
-
-        c_val = float(c_sub.iloc[-1])
-        o_val = float(o_sub.iloc[-1])
-
-        if not (70 <= c_val <= 1000):
-          continue
-        if (
-            (c_sub * v_sub).rolling(window=20).mean().iloc[-1]
-            < 2_000_000_000
-        ):
-          continue
-        if ((c_val - o_val) / o_val) * 100 < 3.0:
-          continue
-        if c_val <= c_sub.rolling(window=5).mean().iloc[-1]:
-          continue
-
-        hn = h_sub.rolling(14).max()
-        ln = l_sub.rolling(14).min()
-        mid = (hn + ln) / 2
-        d = c_sub - mid
-        e2d = (
-            d.ewm(span=3, adjust=False).mean().ewm(span=3, adjust=False).mean()
-        )
-        e2hl = (
-            (hn - ln)
-            .ewm(span=3, adjust=False)
-            .mean()
-            .ewm(span=3, adjust=False)
-            .mean()
-        )
-        sm = (e2d / (e2hl / 2)) * 100
-        sms = sm.ewm(span=4, adjust=False).mean()
-
-        if len(sm) < 2:
-          continue
-        if (sm.iloc[-1] > sms.iloc[-1]) and (sm.iloc[-2] <= sms.iloc[-2]):
-          tr_sub = pd.concat(
-              [
-                  h_sub - l_sub,
-                  abs(h_sub - c_sub.shift()),
-                  abs(l_sub - c_sub.shift()),
-              ],
-              axis=1,
-          ).max(axis=1)
-          atr_v = tr_sub.rolling(14).mean().iloc[-1]
-          tp_v = c_val + (1.5 * atr_v)
-          sl_v = c_val - (1.0 * atr_v)
-
-          hit = False
-          for f in range(1, 15):
-            if i + f >= len(df):
-              break
-            fh = float(high.iloc[i + f])
-            fl = float(low.iloc[i + f])
-            if fh >= tp_v:
-              past_wins += 1
-              hit = True
-              break
-            elif fl <= sl_v:
-              past_losses += 1
-              hit = True
-              break
-          if not hit:
-            if float(close.iloc[min(i + 14, len(df) - 1)]) > c_val:
-              past_wins += 1
-            else:
-              past_losses += 1
-
-      total_trades = past_wins + past_losses
-
-      # VALIDASI KETAT: Minimal harus ada 2 sampel uji masa lalu agar layak masuk ranking
-      if total_trades < 2:
-        continue
-
-      win_rate = (past_wins / total_trades) * 100
-
-      valid_signals.append({
-          'ticker': ticker.replace('.JK', ''),
-          'price': int(last_close),
-          'candle_pct': candle_pct,
-          'tp_price': int(tp_price),
-          'tp_pct': tp_pct,
-          'sl_price': int(sl_price),
-          'sl_pct': sl_pct,
-          'win_rate': win_rate,
-          'trades': total_trades,
-      })
+        return {
+            "ticker": ticker.replace(".JK", ""),
+            "price": last_close,
+            "target": target_tp,
+            "win_rate": win_rate
+        }
 
     except Exception as e:
-      continue
+        print(f"Error pada {ticker}: {e}")
+        return None
 
-  # Urutkan berdasarkan Win Rate tertinggi, lalu jumlah sampel terbanyak
-  valid_signals.sort(key=lambda x: (x['win_rate'], x['trades']), reverse=True)
+# ==========================================
+# EKSEKUSI UTAMA (MAIN PROGRAM)
+# ==========================================
+def main():
+    # Membaca daftar saham dari file induk 'tickers.txt'
+    if not os.path.exists("tickers.txt"):
+        print("File tickers.txt tidak ditemukan!")
+        return
 
-  # Ambil Top 2 terbaik
-  top_signals = valid_signals[:2]
+    with open("tickers.txt", "r") as f:
+        tickers = [line.strip() + ".JK" for line in f if line.strip()]
 
-  if not top_signals:
-    report += (
-        'Belum ada emiten dengan sampel historis AI yang cukup hari'
-        ' ini. *Cash is King!*'
-    )
-  else:
-    for sig in top_signals:
-      report += f"📌 *{sig['ticker']}* (Harga: Rp {sig['price']})\n"
-      report += f"   • AI Win Rate: *{sig['win_rate']:.1f}%* (Dari {sig['trades']} sampel uji setahun)\n"
-      report += f"   • Kenaikan Harian: +{sig['candle_pct']:.1f}%\n"
-      report += f"   • TP: Rp {sig['tp_price']} (+{sig['tp_pct']:.1f}%)\n"
-      report += f"   • SL: Rp {sig['sl_price']} (-{sig['sl_pct']:.1f}%)\n\n"
+    print(f"Memindai {len(tickers)} emiten dari database induk...")
+    
+    results = []
+    for t in tickers:
+        res = analyze_stock(t)
+        if res:
+            results.append(res)
 
-  send_telegram_message(report)
+    # Urutkan berdasarkan Win Rate tertinggi, lalu ambil MAKSIMAL 2 SAHAM TERBAIK
+    results = sorted(results, key=lambda x: x['win_rate'], reverse=True)[:2]
 
+    if not results:
+        print("Tidak ada saham yang lolos kualifikasi ketat hari ini.")
+        return
 
-if __name__ == '__main__':
-  main()
+    # Susun Format Laporan ke Telegram (Sesuai Request Lu)
+    message = "🚨 *QUANT SWING SIGNAL (TOP PICK)* 🚨\n"
+    message += "⚖️ *Prinsip: Keselamatan Modal Nomor 1*\n\n"
+
+    for r in results:
+        message += f"📌 **{r['ticker']}** (Harga: Rp {r['price']})\n"
+        message += f"• Screener: BB Upper Cross + Likuiditas Sehat\n"
+        message += f"• Strategi: Sell On Strength (SOS) - Close to High\n"
+        message += f"• Target Cuan (Adaptive): +3.5% (Rp {r['target']}) - Pasang Auto Order Jual!\n"
+        message += f"• Max Hold Time: P5 (5 Hari)\n"
+        message += f"• AI Historical WR: {r['win_rate']}% (Validasi Historis Kuat)\n"
+        message += f"• Stop Loss: Tidak Ada (Disiplin Jual di hari ke-5 / Time-Stop jika belum capai target)\n\n"
+
+    message += "💡 *Catatan Pagi:* Cek pembukaan market besok. Jika hijau lanjut, pegang. Jika merah/layu, amankan posisi!"
+    
+    send_telegram_message(message)
+    print("Laporan berhasil dikirim ke Telegram!")
+
+if __name__ == "__main__":
+    main()
