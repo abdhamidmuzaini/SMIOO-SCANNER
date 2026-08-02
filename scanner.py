@@ -29,9 +29,7 @@ def send_telegram_message(message):
 # ==========================================
 def analyze_stock_with_ai(ticker, df_saham):
     try:
-        # Bersihkan data (buang hari yang libur/kosong)
         df = df_saham.dropna().copy()
-        
         if df.empty or len(df) < 100:
             return None
 
@@ -55,7 +53,7 @@ def analyze_stock_with_ai(ticker, df_saham):
         df['ATR'] = tr.rolling(14).mean()
         df['Volatilitas'] = df['ATR'] / close
 
-        # B. SMI Ergodic Oscillator
+        # B. SMIIO (SMI Ergodic Oscillator 5, 20, 5)
         price_diff = close.diff()
         ema1_diff = price_diff.ewm(span=20, adjust=False).mean()
         ema2_diff = ema1_diff.ewm(span=5, adjust=False).mean()
@@ -102,11 +100,20 @@ def analyze_stock_with_ai(ticker, df_saham):
         
         df['Label'] = labels
 
-        # Cek kondisi HARI INI
-        is_smi_cross = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
-        is_smi_active = (df['SMI'].iloc[-1] > 0) and (df['SMI_Hist'].iloc[-1] > 0)
+        # ==========================================
+        # FILTER KONDISI SMIIO (BARU GOLDEN CROSS & DI ZONA AMAN)
+        # ==========================================
+        # Cek apakah terjadi Golden Cross dalam 2 hari terakhir (hari ini atau kemarin)
+        gc_hari_ini = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
+        gc_kemarin = (df['SMI'].iloc[-2] > df['SMI_Signal'].iloc[-2]) and (df['SMI'].iloc[-3] <= df['SMI_Signal'].iloc[-3])
+        is_new_golden_cross = gc_hari_ini or gc_kemarin
 
-        if not (is_smi_cross or is_smi_active):
+        # Cek posisi nilai SMIIO saat ini (Tidak boleh di bawah -0.1 dan tidak boleh di atas 0.3)
+        current_smi = df['SMI'].iloc[-1]
+        is_in_sweet_spot = (-0.1 <= current_smi <= 0.3)
+
+        # Jika bukan Golden Cross baru, ATAU posisinya sudah terlalu tinggi/terlalu di bawah, skip!
+        if not (is_new_golden_cross and is_in_sweet_spot):
             return None
 
         # 3. TRAINING MACHINE LEARNING (Random Forest)
@@ -124,7 +131,7 @@ def analyze_stock_with_ai(ticker, df_saham):
         today_features = df.iloc[-1:][features]
         ai_confidence = model.predict_proba(today_features)[0][1] * 100 
         
-        # Harus sangat yakin (> 70%)
+        # Harus yakin > 70%
         if ai_confidence < 70:
             return None
 
@@ -144,7 +151,8 @@ def analyze_stock_with_ai(ticker, df_saham):
             "target_pct": target_pct,
             "stop": stop_ls,
             "stop_pct": stop_pct,
-            "confidence": int(ai_confidence)
+            "confidence": int(ai_confidence),
+            "smi_val": round(current_smi, 2)
         }
 
     except Exception as e:
@@ -161,17 +169,14 @@ def main():
     with open("tickers.txt", "r") as f:
         tickers = [line.strip() + ".JK" for line in f if line.strip()]
 
-    print(f"📥 Mengunduh massal {len(tickers)} saham sekaligus (Super Cepat)...")
-    
-    # PERUBAHAN BESAR: Mengunduh semua saham dalam 1 baris perintah!
+    print(f"📥 Mengunduh massal {len(tickers)} saham...")
     data_all = yf.download(tickers, period="18mo", interval="1d", progress=False)
     
-    print("🤖 Mulai analisa Machine Learning per saham...")
+    print("🤖 Memindai dengan Filter Zona Aman SMIIO + AI...")
     
     results = []
     for t in tickers:
         try:
-            # Mengambil data saham spesifik dari kumpulan data besar
             df_saham = pd.DataFrame({
                 'Close': data_all['Close'][t],
                 'High': data_all['High'][t],
@@ -183,29 +188,29 @@ def main():
             if res:
                 results.append(res)
         except Exception:
-            continue # Lewati jika saham tidak ada datanya (delisting/suspend)
+            continue
 
     results = sorted(results, key=lambda x: x['confidence'], reverse=True)[:3]
 
     if not results:
-        print("Tidak ada saham yang lolos kualifikasi AI hari ini.")
+        print("Tidak ada saham yang lolos kualifikasi Zona Aman AI hari ini.")
         return
 
-    message = "🤖 *AI STOCK PREDICTOR (RANDOM FOREST)* 🤖\n"
-    message += "⚖️ *Prinsip: Keselamatan Modal Nomor 1*\n\n"
+    message = "🤖 *AI STOCK PREDICTOR (SMIIO SWEET SPOT)* 🤖\n"
+    message += "⚖️ *Filter: Fresh Golden Cross di Zona Aman (-0.1 s.d +0.3)*\n\n"
 
     for r in results:
         message += f"📌 **{r['ticker']}** (Harga: Rp {r['price']})\n"
-        message += f"• Setup: SMIEO Cross + 5 Indikator (RSI, Vol, Trend)\n"
+        message += f"• SMIIO Value: {r['smi_val']} (Fresh GC di Zona Aman)\n"
         message += f"• Prediksi AI (Confidence): 🔥 **{r['confidence']}%** 🔥\n"
         message += f"• Target Cuan (ATR): +{r['target_pct']}% (Rp {r['target']})\n" 
         message += f"• Stop Loss (ATR): -{r['stop_pct']}% (Rp {r['stop']})\n"
         message += f"• Max Hold Time: P5 (5 Hari)\n\n"
 
-    message += "💡 *Catatan:* AI memproses probabilitas masa lalu ke kondisi saat ini. Tetap disiplin dengan Stop Loss!"
+    message += "💡 *Catatan:* Bot hanya meloloskan saham yang baru menyilang di area awal kenaikan."
     
     send_telegram_message(message)
-    print("Laporan AI berhasil dikirim!")
+    print("Laporan berhasil dikirim!")
 
 if __name__ == "__main__":
     main()
