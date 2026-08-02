@@ -28,101 +28,120 @@ def send_telegram_message(message):
         print(f"Error koneksi Telegram: {e}")
 
 # ==========================================
-# RUMUS INDIKATOR: SMI ERGODIC OSCILLATOR & AI HISTORIS
+# RUMUS INDIKATOR: SMIEO + ADAPTIVE TP & SL (ATR)
 # ==========================================
 def analyze_stock(ticker):
     try:
-        # Unduh data historis
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty or len(df) < 50:
             return None
         
-        # Rapihkan kolom jika MultiIndex (dari yfinance terbaru)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         close = df['Close']
         high = df['High']
+        low = df['Low']
         volume = df['Volume']
 
-        # 1. FILTER LIKUIDITAS (Anti-Nyangkut: Min Rp 1 Miliar/hari)
+        # 1. FILTER LIKUIDITAS & HARGA
         value_txn = close * volume
         avg_value_20 = value_txn.rolling(window=20).mean().iloc[-1]
-        if avg_value_20 < 1_000_000_000:
-            return None
-
-        # 2. FILTER HARGA DASAR (Di bawah Rp 2000)
+        if avg_value_20 < 1_000_000_000: return None
+        
         last_close = float(close.iloc[-1])
-        if last_close > 2000:
-            return None
+        if last_close > 2000: return None
 
-        # 3. RUMUS UTAMA: SMI ERGODIC OSCILLATOR (SMIEO)
-        # Parameter standar Blau Ergodic: Long EMA = 20, Short EMA = 5, Signal EMA = 5
+        # 2. MENGHITUNG ATR (Average True Range) 14 HARI
+        prev_close = close.shift(1)
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+        atr = tr.rolling(window=14).mean() 
+
+        # 3. RUMUS SMI ERGODIC OSCILLATOR
         long_len = 20
         short_len = 5
         sig_len = 5
 
-        # Hitung selisih harga (Price Change) & nilai absolutnya
         price_diff = close.diff()
         abs_price_diff = price_diff.abs()
 
-        # Double Smoothing (Penghalusan Ganda)
         ema1_diff = price_diff.ewm(span=long_len, adjust=False).mean()
         ema2_diff = ema1_diff.ewm(span=short_len, adjust=False).mean()
-
         ema1_abs = abs_price_diff.ewm(span=long_len, adjust=False).mean()
         ema2_abs = ema1_abs.ewm(span=short_len, adjust=False).mean()
 
-        # Hitung SMI Ergodic Line dan Signal Line
-        # Menghindari pembagian dengan 0
         smi_line = np.where(ema2_abs == 0, 0, (ema2_diff / ema2_abs) * 100)
         smi_line = pd.Series(smi_line, index=close.index)
         signal_line = smi_line.ewm(span=sig_len, adjust=False).mean()
 
-        # Kondisi: Hari ini SMI Ergodic crossing ke atas signal line / atau posisi momentum positif
         is_smi_cross = (smi_line.iloc[-1] > signal_line.iloc[-1]) and (smi_line.iloc[-2] <= signal_line.iloc[-2])
         is_smi_active = (smi_line.iloc[-1] > 0) and (smi_line.iloc[-1] > signal_line.iloc[-1])
 
         if not (is_smi_cross or is_smi_active):
             return None
 
-        # 4. SIMULASI AI MACHINE LEARNING (Backtest Historis Pola SMI Ergodic)
-        # Dioptimalkan: Menggunakan series yang sudah dihitung agar 100x lebih cepat
+        # 4. BACKTEST STATISTIK: Cek Realistis TP vs SL
         success_count = 0
         total_signals = 0
         
-        # Mulai dari index 50 agar indikator EMA sudah stabil (tidak ada efek data awal)
         for i in range(50, len(df) - 5):
-            # Cek apakah di masa lalu garis Ergodic berada di atas Signal
             if smi_line.iloc[i] > signal_line.iloc[i]:
                 total_signals += 1
-                future_slice = high.iloc[i+1:i+6] # Cek 5 hari ke depan
-                target_price = float(close.iloc[i]) * 1.035 # Target +3.5%
                 
-                if (future_slice >= target_price).any():
+                historical_target = close.iloc[i] + (1.5 * atr.iloc[i])
+                historical_sl = close.iloc[i] - (1.0 * atr.iloc[i])
+                
+                win = False
+                # Cek pergerakan harga maksimal 5 hari ke depan
+                for day in range(1, 6):
+                    future_idx = i + day
+                    if future_idx < len(df):
+                        # Jika harga tertinggi tembus Target Profit duluan
+                        if high.iloc[future_idx] >= historical_target:
+                            win = True
+                            break
+                        # Jika harga terendah tembus Stop Loss duluan
+                        elif low.iloc[future_idx] <= historical_sl:
+                            break # Terkena SL, Win dibatalkan
+                            
+                if win:
                     success_count += 1
 
         win_rate = int((success_count / total_signals) * 100) if total_signals > 0 else 50
         
-        # Filter ketat: Win Rate historis minimal 75%
-        if win_rate < 75:
+        # Filter ketat: Win Rate historis minimal 70% setelah ada SL
+        if win_rate < 70:
             return None
 
-        target_tp = round(last_close * 1.035)
+        # 5. MENENTUKAN TARGET & SL HARI INI
+        current_atr = float(atr.iloc[-1])
+        
+        # Target Profit (1.5x ATR)
+        target_tp = round(last_close + (1.5 * current_atr))
+        target_pct = round(((target_tp - last_close) / last_close) * 100, 1)
+        
+        # Stop Loss (1.0x ATR)
+        stop_ls = round(last_close - (1.0 * current_atr))
+        stop_pct = round(((last_close - stop_ls) / last_close) * 100, 1)
 
         return {
             "ticker": ticker.replace(".JK", ""),
             "price": last_close,
             "target": target_tp,
+            "target_pct": target_pct,
+            "stop": stop_ls,
+            "stop_pct": stop_pct,
             "win_rate": win_rate
         }
 
     except Exception as e:
-        # print(f"Error pada {ticker}: {e}") # Matikan print error agar terminal lebih bersih
         return None
 
 # ==========================================
-# EKSEKUSI UTAMA (MAIN PROGRAM)
+# EKSEKUSI UTAMA
 # ==========================================
 def main():
     if not os.path.exists("tickers.txt"):
@@ -132,7 +151,7 @@ def main():
     with open("tickers.txt", "r") as f:
         tickers = [line.strip() + ".JK" for line in f if line.strip()]
 
-    print(f"Memindai {len(tickers)} emiten dengan SMI Ergodic Oscillator & AI...")
+    print(f"Memindai {len(tickers)} emiten dengan SMI Ergodic & Adaptive TP/SL...")
     
     results = []
     for t in tickers:
@@ -140,29 +159,29 @@ def main():
         if res:
             results.append(res)
 
-    # Urutkan berdasarkan Win Rate tertinggi, ambil maksimal 2 saham terbaik
+    # Ambil 2 terbaik
     results = sorted(results, key=lambda x: x['win_rate'], reverse=True)[:2]
 
     if not results:
-        print("Tidak ada saham yang lolos kualifikasi SMIEO & AI hari ini.")
+        print("Tidak ada saham yang lolos kualifikasi hari ini.")
         return
 
-    message = "🚨 *SMI ERGODIC SWING SIGNAL + AI* 🚨\n"
+    message = "🚨 *SMI ERGODIC SWING SIGNAL* 🚨\n"
     message += "⚖️ *Prinsip: Keselamatan Modal Nomor 1*\n\n"
 
     for r in results:
         message += f"📌 **{r['ticker']}** (Harga: Rp {r['price']})\n"
         message += f"• Screener: SMI Ergodic Crossover + Likuiditas Sehat\n"
-        message += f"• Strategi: Sell On Strength (SOS) / Trend Following\n"
-        message += f"• Target Cuan (Adaptive): +3.5% (Rp {r['target']}) - Pasang Auto Order Jual!\n"
+        message += f"• Strategi: Sell On Strength / Trend Following\n"
+        message += f"• Target Cuan (ATR): +{r['target_pct']}% (Rp {r['target']})\n" 
+        message += f"• Stop Loss (ATR): -{r['stop_pct']}% (Rp {r['stop']})\n"
         message += f"• Max Hold Time: P5 (5 Hari)\n"
-        message += f"• AI Machine Learning WR: {r['win_rate']}% (Validasi Sejarah Kuat)\n"
-        message += f"• Stop Loss: Tidak Ada (Disiplin Jual di hari ke-5 / Patah Tren)\n\n"
+        message += f"• Historical Win Rate: {r['win_rate']}% (Setelah Uji TP vs SL)\n\n"
 
-    message += "💡 *Catatan Pagi:* Cek pembukaan market besok. Jika hijau lanjut, pegang. Jika merah/layu, amankan posisi!"
+    message += "💡 *Catatan Pagi:* Selalu disiplin pasang antrean jual otomatis (Target) sekaligus batas rugi (Stop Loss). Jangan baper sama saham!"
     
     send_telegram_message(message)
-    print("Laporan SMI Ergodic berhasil dikirim ke Telegram!")
+    print("Laporan berhasil dikirim ke Telegram!")
 
 if __name__ == "__main__":
     main()
