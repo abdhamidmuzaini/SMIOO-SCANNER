@@ -101,18 +101,18 @@ def analyze_stock_with_ai(ticker, df_saham):
         df['Label'] = labels
 
         # ==========================================
-        # FILTER KONDISI SMIIO (BARU GOLDEN CROSS & DI ZONA AMAN)
+        # FILTER KONDISI SMIIO (DIPERLUAS: 3 HARI & ZONA -0.2 s.d +0.4)
         # ==========================================
-        # Cek apakah terjadi Golden Cross dalam 2 hari terakhir (hari ini atau kemarin)
-        gc_hari_ini = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
-        gc_kemarin = (df['SMI'].iloc[-2] > df['SMI_Signal'].iloc[-2]) and (df['SMI'].iloc[-3] <= df['SMI_Signal'].iloc[-3])
-        is_new_golden_cross = gc_hari_ini or gc_kemarin
+        # Cek apakah terjadi Golden Cross dalam 3 hari terakhir
+        gc_h0 = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
+        gc_h1 = (df['SMI'].iloc[-2] > df['SMI_Signal'].iloc[-2]) and (df['SMI'].iloc[-3] <= df['SMI_Signal'].iloc[-3])
+        gc_h2 = (df['SMI'].iloc[-3] > df['SMI_Signal'].iloc[-3]) and (df['SMI'].iloc[-4] <= df['SMI_Signal'].iloc[-4])
+        is_new_golden_cross = gc_h0 or gc_h1 or gc_h2
 
-        # Cek posisi nilai SMIIO saat ini (Tidak boleh di bawah -0.1 dan tidak boleh di atas 0.3)
+        # Zona SMIIO yang diperluas ke -0.2 s.d +0.4
         current_smi = df['SMI'].iloc[-1]
-        is_in_sweet_spot = (-0.1 <= current_smi <= 0.3)
+        is_in_sweet_spot = (-0.2 <= current_smi <= 0.4)
 
-        # Jika bukan Golden Cross baru, ATAU posisinya sudah terlalu tinggi/terlalu di bawah, skip!
         if not (is_new_golden_cross and is_in_sweet_spot):
             return None
 
@@ -127,12 +127,11 @@ def analyze_stock_with_ai(ticker, df_saham):
         model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
         model.fit(X, y)
 
-        # 4. PREDIKSI
+        # 4. PREDIKSI (Confidence diturunkan ke 65%)
         today_features = df.iloc[-1:][features]
         ai_confidence = model.predict_proba(today_features)[0][1] * 100 
         
-        # Harus yakin > 70%
-        if ai_confidence < 70:
+        if ai_confidence < 65:
             return None
 
         last_close = float(close.iloc[-1])
@@ -172,7 +171,7 @@ def main():
     print(f"📥 Mengunduh massal {len(tickers)} saham...")
     data_all = yf.download(tickers, period="18mo", interval="1d", progress=False)
     
-    print("🤖 Memindai dengan Filter Zona Aman SMIIO + AI...")
+    print("🤖 Memindai dengan Parameter Fleksibel SMIIO + AI...")
     
     results = []
     for t in tickers:
@@ -193,21 +192,21 @@ def main():
     results = sorted(results, key=lambda x: x['confidence'], reverse=True)[:3]
 
     if not results:
-        print("Tidak ada saham yang lolos kualifikasi Zona Aman AI hari ini.")
+        print("Tidak ada saham yang lolos kualifikasi fleksibel hari ini.")
         return
 
-    message = "🤖 *AI STOCK PREDICTOR (SMIIO SWEET SPOT)* 🤖\n"
-    message += "⚖️ *Filter: Fresh Golden Cross di Zona Aman (-0.1 s.d +0.3)*\n\n"
+    message = "🤖 *AI STOCK PREDICTOR (FLEKSIBEL MODE)* 🤖\n"
+    message += "⚖️ *Filter: GC 3 Hari Terakhir | Zona -0.2 s.d +0.4 | Min Conf 65%*\n\n"
 
     for r in results:
         message += f"📌 **{r['ticker']}** (Harga: Rp {r['price']})\n"
-        message += f"• SMIIO Value: {r['smi_val']} (Fresh GC di Zona Aman)\n"
+        message += f"• SMIIO Value: {r['smi_val']} (Zona Aman Fleksibel)\n"
         message += f"• Prediksi AI (Confidence): 🔥 **{r['confidence']}%** 🔥\n"
         message += f"• Target Cuan (ATR): +{r['target_pct']}% (Rp {r['target']})\n" 
         message += f"• Stop Loss (ATR): -{r['stop_pct']}% (Rp {r['stop']})\n"
         message += f"• Max Hold Time: P5 (5 Hari)\n\n"
 
-    message += "💡 *Catatan:* Bot hanya meloloskan saham yang baru menyilang di area awal kenaikan."
+    message += "💡 *Catatan:* Filter diperlonggar agar bot lebih responsif menangkap momentum."
     
     send_telegram_message(message)
     print("Laporan berhasil dikirim!")
