@@ -7,9 +7,8 @@ import yfinance as yf
 # ==========================================
 # KONFIGURASI TELEGRAM & TARGET
 # ==========================================
-# Token & Chat ID diambil dari GitHub Secrets supaya aman
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
 
 def send_telegram_message(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -33,12 +32,10 @@ def send_telegram_message(message):
 # ==========================================
 def analyze_stock(ticker):
     try:
-        # Ambil data historis 1 tahun ke belakang
         df = yf.download(ticker, period="1y", interval="1d", progress=False)
         if df.empty or len(df) < 50:
             return None
         
-        # Bersihkan format multi-index jika ada dari yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -47,48 +44,42 @@ def analyze_stock(ticker):
         low = df['Low']
         volume = df['Volume']
 
-        # 1. FILTER LIKUIDITAS (Anti-Nyangkut: Nilai transaksi rata-rata 20 hari min Rp 1 Miliar)
+        # 1. FILTER LIKUIDITAS (Anti-Nyangkut: Min Rp 1 Miliar/hari)
         value_txn = close * volume
         avg_value_20 = value_txn.rolling(window=20).mean().iloc[-1]
-        if avg_value_20 < 1_000_000_000: # Di bawah 1 Miliar skip!
+        if avg_value_20 < 1_000_000_000:
             return None
 
         # 2. FILTER HARGA & RATA-RATA HARIAN
         last_close = float(close.iloc[-1])
         prev_close = float(close.iloc[-2])
         
-        # Syarat harga di bawah 2000 (sesuai gaya lu) dan candle hijau
         if last_close > 2000 or last_close <= prev_close:
             return None
 
-        # 3. INDIKATOR BOLLINGER BANDS (Periode 20, Dev 2)
+        # 3. BOLLINGER BANDS
         sma_20 = close.rolling(window=20).mean()
         std_20 = close.rolling(window=20).std()
         upper_band = sma_20 + (std_20 * 2)
         
-        # Kondisi: Hari ini tembus / menyentuh Upper Band
         if last_close < float(upper_band.iloc[-1]):
             return None
 
         # 4. SIMULASI AI HISTORIS (Backtest Pola Close-to-High P1-P5)
-        # Menghitung seberapa sering dalam setahun terakhir saham ini naik min 3% dalam 5 hari ke depan
         success_count = 0
         total_signals = 0
         
         for i in range(20, len(df) - 5):
-            # Cek apakah pola mirip terjadi di masa lalu
             if float(close.iloc[i]) > float(upper_band.iloc[i]):
                 total_signals += 1
-                future_slice = high.iloc[i+1:i+6] # Cek 5 hari kedepan (P1 - P5)
-                target_price = float(close.iloc[i]) * 1.035 # Target +3.5%
+                future_slice = high.iloc[i+1:i+6]
+                target_price = float(close.iloc[i]) * 1.035
                 
                 if (future_slice >= target_price).any():
                     success_count += 1
 
-        # Hitung Win Rate Historis
         win_rate = int((success_count / total_signals) * 100) if total_signals > 0 else 50
         
-        # Filter ketat: Hanya ambil yang Win Rate historisnya >= 75%
         if win_rate < 75:
             return None
 
@@ -109,7 +100,6 @@ def analyze_stock(ticker):
 # EKSEKUSI UTAMA (MAIN PROGRAM)
 # ==========================================
 def main():
-    # Membaca daftar saham dari file induk 'tickers.txt'
     if not os.path.exists("tickers.txt"):
         print("File tickers.txt tidak ditemukan!")
         return
@@ -125,14 +115,12 @@ def main():
         if res:
             results.append(res)
 
-    # Urutkan berdasarkan Win Rate tertinggi, lalu ambil MAKSIMAL 2 SAHAM TERBAIK
     results = sorted(results, key=lambda x: x['win_rate'], reverse=True)[:2]
 
     if not results:
         print("Tidak ada saham yang lolos kualifikasi ketat hari ini.")
         return
 
-    # Susun Format Laporan ke Telegram (Sesuai Request Lu)
     message = "🚨 *QUANT SWING SIGNAL (TOP PICK)* 🚨\n"
     message += "⚖️ *Prinsip: Keselamatan Modal Nomor 1*\n\n"
 
@@ -152,3 +140,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
