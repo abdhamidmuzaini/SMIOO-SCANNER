@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install yfinance pandas requests numpy
+          pip install yfinance pandas numpy requests scikit-learn
 
       - name: Run scanner script
         env:
