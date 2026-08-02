@@ -25,7 +25,7 @@ def send_telegram_message(message):
         print(f"Error koneksi Telegram: {e}")
 
 # ==========================================
-# FUNGSI ANALISA SAHAM (IMPROVED)
+# FUNGSI ANALISA SAHAM (FILTER DILONGGARIN)
 # ==========================================
 def analyze_stock_with_ai(ticker, df_saham):
     try:
@@ -39,23 +39,23 @@ def analyze_stock_with_ai(ticker, df_saham):
         volume = df['Volume']
 
         # ==========================================
-        # FILTER LIKUIDITAS & HARGA (DIPERKETAT)
+        # FILTER LIKUIDITAS & HARGA (DIPERLONGGAR)
         # ==========================================
         value_txn = close * volume
         avg_value = value_txn.rolling(window=20).mean().iloc[-1]
         
-        if avg_value < 2_000_000_000:  # Minimal 2M/hari
+        if avg_value < 2_000_000_000:  # Tetap 2M
             return None
         
         last_price = float(close.iloc[-1])
-        if not (50 <= last_price <= 1000):  # Harga 50-1000
+        if not (50 <= last_price <= 1500):  # 50-1500
             return None
 
         # ==========================================
         # FEATURE ENGINEERING
         # ==========================================
         
-        # ATR (Volatilitas)
+        # ATR
         tr1 = high - low
         tr2 = (high - close.shift(1)).abs()
         tr3 = (low - close.shift(1)).abs()
@@ -64,7 +64,7 @@ def analyze_stock_with_ai(ticker, df_saham):
         df['ATR_MA20'] = df['ATR'].rolling(20).mean()
         df['Volatilitas'] = df['ATR'] / close
 
-        # SMI Ergodic Oscillator (20, 5, 5)
+        # SMI Ergodic (20, 5, 5)
         price_diff = close.diff()
         ema1_diff = price_diff.ewm(span=20, adjust=False).mean()
         ema2_diff = ema1_diff.ewm(span=5, adjust=False).mean()
@@ -75,45 +75,42 @@ def analyze_stock_with_ai(ticker, df_saham):
         df['SMI_Signal'] = df['SMI'].ewm(span=5, adjust=False).mean()
         df['SMI_Hist'] = df['SMI'] - df['SMI_Signal']
         
-        # Volume Surge
+        # Volume & Trend
         df['Vol_Surge'] = volume / volume.rolling(20).mean()
-
-        # Trend EMA 20 & 50
         df['EMA20'] = close.ewm(span=20, adjust=False).mean()
         df['EMA50'] = close.ewm(span=50, adjust=False).mean()
         df['Dist_EMA20'] = close / df['EMA20']
         df['Dist_EMA50'] = close / df['EMA50']
 
-        # RSI 14
+        # RSI
         gain = (price_diff.where(price_diff > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         loss = (-price_diff.where(price_diff < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
         # ==========================================
-        # GOLDEN CROSS DETECTION (3 HARI TERAKHIR)
+        # GOLDEN CROSS + SWEET SPOT (DIPERLEBAR)
         # ==========================================
         gc_h0 = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
         gc_h1 = (df['SMI'].iloc[-2] > df['SMI_Signal'].iloc[-2]) and (df['SMI'].iloc[-3] <= df['SMI_Signal'].iloc[-3])
         gc_h2 = (df['SMI'].iloc[-3] > df['SMI_Signal'].iloc[-3]) and (df['SMI'].iloc[-4] <= df['SMI_Signal'].iloc[-4])
         is_golden_cross = gc_h0 or gc_h1 or gc_h2
 
-        # Sweet spot: -0.2 s/d 0.4
         current_smi = df['SMI'].iloc[-1]
-        is_sweet_spot = (-0.2 <= current_smi <= 0.4)
+        is_sweet_spot = (-0.5 <= current_smi <= 0.8)  # DIPERLEBAR
 
         if not (is_golden_cross and is_sweet_spot):
             return None
 
         # ==========================================
-        # BACKTEST VERIFICATION (NEW!)
+        # BACKTEST VERIFICATION (WR MIN 35%)
         # ==========================================
         wins, total = 0, 0
         
         for i in range(100, len(df)-5):
             past_gc = (df['SMI'].iloc[i] > df['SMI_Signal'].iloc[i]) and \
                       (df['SMI'].iloc[i-1] <= df['SMI_Signal'].iloc[i-1])
-            past_sweet = -0.2 <= df['SMI'].iloc[i] <= 0.4
+            past_sweet = -0.5 <= df['SMI'].iloc[i] <= 0.8
             
             if past_gc and past_sweet:
                 entry = df['Close'].iloc[i]
@@ -124,13 +121,12 @@ def analyze_stock_with_ai(ticker, df_saham):
                     wins += 1
                 total += 1
         
-        # Minimal 3 trades & WR > 40%
         if total < 3:
             return None
         
         wr = wins / total * 100
         
-        if wr < 40:
+        if wr < 35:  # Diturunin ke 35%
             return None
         
         # Profit Factor
@@ -139,7 +135,7 @@ def analyze_stock_with_ai(ticker, df_saham):
         for i in range(100, len(df)-5):
             past_gc = (df['SMI'].iloc[i] > df['SMI_Signal'].iloc[i]) and \
                       (df['SMI'].iloc[i-1] <= df['SMI_Signal'].iloc[i-1])
-            past_sweet = -0.2 <= df['SMI'].iloc[i] <= 0.4
+            past_sweet = -0.5 <= df['SMI'].iloc[i] <= 0.8
             
             if past_gc and past_sweet:
                 entry = df['Close'].iloc[i]
@@ -154,7 +150,7 @@ def analyze_stock_with_ai(ticker, df_saham):
         profit_factor = round(total_win / total_loss, 2) if total_loss > 0 else 999
 
         # ==========================================
-        # AI/ML PREDICTION
+        # AI/ML PREDICTION (CONF MIN 60%)
         # ==========================================
         df_clean = df.dropna().copy()
         if len(df_clean) < 100:
@@ -163,7 +159,6 @@ def analyze_stock_with_ai(ticker, df_saham):
         features = ['SMI_Hist', 'Vol_Surge', 'RSI', 'Dist_EMA20', 'Dist_EMA50', 'Volatilitas']
         X = df_clean[features]
         
-        # Labeling
         df_clean['Target_TP'] = df_clean['Close'] + (1.5 * df_clean['ATR'])
         df_clean['Target_SL'] = df_clean['Close'] - (1.0 * df_clean['ATR'])
         
@@ -172,7 +167,6 @@ def analyze_stock_with_ai(ticker, df_saham):
             if i >= len(df_clean) - 5:
                 labels.append(np.nan)
                 continue
-            
             win = 0
             for day in range(1, 6):
                 if df_clean['High'].iloc[i+day] >= df_clean['Target_TP'].iloc[i]:
@@ -194,20 +188,19 @@ def analyze_stock_with_ai(ticker, df_saham):
         today_features = df.iloc[-1:][features]
         ai_confidence = model.predict_proba(today_features)[0][1] * 100
         
-        if ai_confidence < 65:
+        if ai_confidence < 60:  # Diturunin ke 60%
             return None
 
         # ==========================================
-        # DYNAMIC TP/SL (NEW!)
+        # DYNAMIC TP/SL
         # ==========================================
         current_atr = float(df['ATR'].iloc[-1])
         avg_atr_20 = float(df['ATR_MA20'].iloc[-1])
         vol_ratio = current_atr / avg_atr_20 if avg_atr_20 > 0 else 1
         
-        # Dynamic multiplier
-        if vol_ratio > 1.3:  # High volatility
+        if vol_ratio > 1.3:
             tp_mult, sl_mult = 2.0, 1.5
-        else:  # Normal
+        else:
             tp_mult, sl_mult = 1.5, 1.0
         
         target_tp = round(last_price + (tp_mult * current_atr))
@@ -215,14 +208,6 @@ def analyze_stock_with_ai(ticker, df_saham):
         
         stop_ls = round(last_price - (sl_mult * current_atr))
         stop_pct = round(((last_price - stop_ls) / last_price) * 100, 1)
-
-        # Setup detection
-        active_setups = []
-        if gc_h0: active_setups.append('GC Today')
-        if gc_h1: active_setups.append('GC Yesterday')
-        if current_smi > 0: active_setups.append('Above Zero')
-        if df['Vol_Surge'].iloc[-1] > 1.5: active_setups.append('High Vol')
-        if close.iloc[-1] > df['EMA20'].iloc[-1]: active_setups.append('>EMA20')
 
         return {
             "ticker": ticker.replace(".JK", ""),
@@ -237,7 +222,6 @@ def analyze_stock_with_ai(ticker, df_saham):
             "total_trades": total,
             "profit_factor": profit_factor,
             "vol_ratio": round(vol_ratio, 2),
-            "active_setups": ", ".join(active_setups),
             "avg_value_m": round(avg_value / 1e9, 1)
         }
 
@@ -277,17 +261,15 @@ def main():
         except Exception:
             continue
 
-    # Sort & ambil top 3
     results = sorted(results, key=lambda x: (x['profit_factor'], x['win_rate'], x['confidence']), reverse=True)[:3]
 
     if not results:
-        message = "❌ Tidak ada saham yang lolos filter ketat hari ini.\n\n"
+        message = "❌ Tidak ada saham yang lolos filter hari ini.\n\n"
         message += "💡 AI memutuskan: Better no trade than bad trade!"
         send_telegram_message(message)
         print("Tidak ada saham yang lolos.")
         return
 
-    # Format Telegram message
     message = "🕌 *SMIIO GOLDEN CROSS - AI VERIFIED* 🕌\n"
     message += f"📅 {pd.Timestamp.now().strftime('%d %B %Y')}\n"
     message += "━━━━━━━━━━━━━━━━━━\n\n"
@@ -301,19 +283,13 @@ def main():
         message += f"🛑 SL        : Rp {r['stop']:,} (-{r['stop_pct']}%)\n"
         message += f"⚖️  R/R       : 1:{r['target_pct']/r['stop_pct']:.1f}\n\n"
         
-        message += f"📊 *Backtest Verified:*\n"
-        message += f"• Win Rate     : {r['win_rate']}% ({r['total_trades']} trades)\n"
-        message += f"• Profit Factor: {r['profit_factor']}\n"
-        message += f"• Volatility   : {r['vol_ratio']}x normal\n\n"
-        
-        message += f"🔍 *Technical:*\n"
-        message += f"• SMIIO Value  : {r['smi_val']}\n"
-        message += f"• Setup Active : {r['active_setups']}\n"
-        message += f"• Avg Volume   : Rp {r['avg_value_m']}M\n\n"
+        message += f"📊 *Backtest:*\n"
+        message += f"• WR: {r['win_rate']}% | PF: {r['profit_factor']}\n"
+        message += f"• SMI: {r['smi_val']} | Vol: {r['vol_ratio']}x\n\n"
         
         message += f"⏰ Max Hold: 5 Hari\n\n"
 
-    message += "💡 *Disclaimer:* Ini tools bantu, tetap DYOR & atur risk management!"
+    message += "💡 *Disclaimer:* Tools bantu, tetap DYOR!"
     
     send_telegram_message(message)
     print("\n✅ Laporan berhasil dikirim ke Telegram!")
