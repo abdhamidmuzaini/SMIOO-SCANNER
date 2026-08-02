@@ -5,7 +5,7 @@ import numpy as np
 import yfinance as yf
 from sklearn.ensemble import RandomForestClassifier
 import warnings
-warnings.filterwarnings('ignore') # Menyembunyikan peringatan pandas/sklearn agar log rapi
+warnings.filterwarnings('ignore')
 
 # ==========================================
 # KONFIGURASI TELEGRAM
@@ -27,14 +27,13 @@ def send_telegram_message(message):
 # ==========================================
 # FUNGSI INDIKATOR TEKNIKAL & AI ML
 # ==========================================
-def analyze_stock_with_ai(ticker):
+def analyze_stock_with_ai(ticker, df_saham):
     try:
-        # 1. AMBIL DATA (Pakai 1.5 tahun agar data latih AI lebih banyak)
-        df = yf.download(ticker, period="18mo", interval="1d", progress=False)
+        # Bersihkan data (buang hari yang libur/kosong)
+        df = df_saham.dropna().copy()
+        
         if df.empty or len(df) < 100:
             return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
 
         close = df['Close']
         high = df['High']
@@ -46,7 +45,7 @@ def analyze_stock_with_ai(ticker):
         if value_txn.rolling(window=20).mean().iloc[-1] < 1_000_000_000: return None
         if float(close.iloc[-1]) > 2000 or float(close.iloc[-1]) < 50: return None
 
-        # 2. FEATURE ENGINEERING (Membuat "Bahan Belajar" untuk AI)
+        # 1. FEATURE ENGINEERING (Bahan Belajar AI)
         
         # A. ATR (Volatilitas)
         tr1 = high - low
@@ -54,7 +53,7 @@ def analyze_stock_with_ai(ticker):
         tr3 = (low - close.shift(1)).abs()
         tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
         df['ATR'] = tr.rolling(14).mean()
-        df['Volatilitas'] = df['ATR'] / close # Rasio kelincahan saham
+        df['Volatilitas'] = df['ATR'] / close
 
         # B. SMI Ergodic Oscillator
         price_diff = close.diff()
@@ -65,9 +64,9 @@ def analyze_stock_with_ai(ticker):
         
         df['SMI'] = np.where(ema2_abs == 0, 0, (ema2_diff / ema2_abs) * 100)
         df['SMI_Signal'] = df['SMI'].ewm(span=5, adjust=False).mean()
-        df['SMI_Hist'] = df['SMI'] - df['SMI_Signal'] # Jarak antara garis SMI dan Signal
+        df['SMI_Hist'] = df['SMI'] - df['SMI_Signal']
         
-        # C. Volume Surge (Lonjakan Volume)
+        # C. Volume Surge
         df['Vol_Surge'] = volume / volume.rolling(20).mean()
 
         # D. Trend EMA 20 & 50
@@ -82,14 +81,13 @@ def analyze_stock_with_ai(ticker):
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
-        # 3. LABELING TARGET UNTUK AI (1 = Menang TP, 0 = Kalah SL)
-        # AI akan melihat ke masa lalu, apakah dalam 5 hari ke depan harga nyentuh TP duluan atau SL duluan?
+        # 2. LABELING TARGET UNTUK AI
         df['Target_TP'] = close + (1.5 * df['ATR'])
         df['Target_SL'] = close - (1.0 * df['ATR'])
         
         labels = []
         for i in range(len(df)):
-            if i >= len(df) - 5: # 5 hari terakhir tidak bisa dilabeli karena masa depan belum terjadi
+            if i >= len(df) - 5: 
                 labels.append(np.nan)
                 continue
             
@@ -99,41 +97,34 @@ def analyze_stock_with_ai(ticker):
                     win = 1
                     break
                 elif low.iloc[i+day] <= df['Target_SL'].iloc[i]:
-                    break # Kena SL duluan
+                    break
             labels.append(win)
         
         df['Label'] = labels
 
-        # Cek kondisi HARI INI: Apakah ada sinyal beli dari SMIEO?
+        # Cek kondisi HARI INI
         is_smi_cross = (df['SMI'].iloc[-1] > df['SMI_Signal'].iloc[-1]) and (df['SMI'].iloc[-2] <= df['SMI_Signal'].iloc[-2])
         is_smi_active = (df['SMI'].iloc[-1] > 0) and (df['SMI_Hist'].iloc[-1] > 0)
 
-        # Jika tidak ada momentum, lewati (hemat waktu komputasi AI)
         if not (is_smi_cross or is_smi_active):
             return None
 
-        # 4. TRAINING MACHINE LEARNING (Random Forest)
-        # Bersihkan data dari NaN
+        # 3. TRAINING MACHINE LEARNING (Random Forest)
         df_clean = df.dropna().copy()
-        
-        if len(df_clean) < 100: # Butuh minimal 100 hari historis untuk melatih AI
-            return None
+        if len(df_clean) < 100: return None
             
-        # Fitur yang akan dipelajari AI
         features = ['SMI_Hist', 'Vol_Surge', 'RSI', 'Dist_EMA20', 'Dist_EMA50', 'Volatilitas']
         X = df_clean[features]
         y = df_clean['Label']
 
-        # Bangun Model Otak AI
         model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
         model.fit(X, y)
 
-        # 5. PREDIKSI HARI INI
+        # 4. PREDIKSI
         today_features = df.iloc[-1:][features]
-        # Mendapatkan probabilitas (Keyakinan) AI untuk kelas 1 (Menang)
         ai_confidence = model.predict_proba(today_features)[0][1] * 100 
         
-        # FILTER KETAT: Hanya rekomendasikan jika AI yakin di atas 70%
+        # Harus sangat yakin (> 70%)
         if ai_confidence < 70:
             return None
 
@@ -170,15 +161,30 @@ def main():
     with open("tickers.txt", "r") as f:
         tickers = [line.strip() + ".JK" for line in f if line.strip()]
 
-    print(f"🤖 Memindai {len(tickers)} emiten dengan Machine Learning (Random Forest)...")
+    print(f"📥 Mengunduh massal {len(tickers)} saham sekaligus (Super Cepat)...")
+    
+    # PERUBAHAN BESAR: Mengunduh semua saham dalam 1 baris perintah!
+    data_all = yf.download(tickers, period="18mo", interval="1d", progress=False)
+    
+    print("🤖 Mulai analisa Machine Learning per saham...")
     
     results = []
     for t in tickers:
-        res = analyze_stock_with_ai(t)
-        if res:
-            results.append(res)
+        try:
+            # Mengambil data saham spesifik dari kumpulan data besar
+            df_saham = pd.DataFrame({
+                'Close': data_all['Close'][t],
+                'High': data_all['High'][t],
+                'Low': data_all['Low'][t],
+                'Volume': data_all['Volume'][t]
+            })
+            
+            res = analyze_stock_with_ai(t, df_saham)
+            if res:
+                results.append(res)
+        except Exception:
+            continue # Lewati jika saham tidak ada datanya (delisting/suspend)
 
-    # Urutkan berdasarkan skor AI Confidence tertinggi, ambil 3 terbaik
     results = sorted(results, key=lambda x: x['confidence'], reverse=True)[:3]
 
     if not results:
@@ -196,10 +202,10 @@ def main():
         message += f"• Stop Loss (ATR): -{r['stop_pct']}% (Rp {r['stop']})\n"
         message += f"• Max Hold Time: P5 (5 Hari)\n\n"
 
-    message += "💡 *Catatan Pagi:* Selalu pasang Auto-Order Jual/StopLoss. Prediksi AI adalah probabilitas, bukan kepastian. Trade with logic, not emotion!"
+    message += "💡 *Catatan:* AI memproses probabilitas masa lalu ke kondisi saat ini. Tetap disiplin dengan Stop Loss!"
     
     send_telegram_message(message)
-    print("Laporan AI berhasil dikirim ke Telegram!")
+    print("Laporan AI berhasil dikirim!")
 
 if __name__ == "__main__":
     main()
