@@ -5,7 +5,7 @@ import numpy as np
 import yfinance as yf
 
 # ==========================================
-# KONFIGURASI TELEGRAM & TARGET
+# KONFIGURASI TELEGRAM
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
@@ -28,7 +28,7 @@ def send_telegram_message(message):
         print(f"Error koneksi Telegram: {e}")
 
 # ==========================================
-# MESIN ANALISIS TEKNIKAL & AI HISTORI
+# RUMUS INDIKATOR SMIOO & AI HISTORIS
 # ==========================================
 def analyze_stock(ticker):
     try:
@@ -50,36 +50,47 @@ def analyze_stock(ticker):
         if avg_value_20 < 1_000_000_000:
             return None
 
-        # 2. FILTER HARGA & RATA-RATA HARIAN
+        # 2. FILTER HARGA DASAR (Di bawah Rp 2000)
         last_close = float(close.iloc[-1])
-        prev_close = float(close.iloc[-2])
-        
-        if last_close > 2000 or last_close <= prev_close:
+        if last_close > 2000:
             return None
 
-        # 3. BOLLINGER BANDS
-        sma_20 = close.rolling(window=20).mean()
-        std_20 = close.rolling(window=20).std()
-        upper_band = sma_20 + (std_20 * 2)
-        
-        if last_close < float(upper_band.iloc[-1]):
+        # 3. RUMUS UTAMA SMIOO (Sinyal Swing & Crossover)
+        # Menggunakan logika momentum SMIOO (Moving Average / Delta konvergen harian)
+        ema_fast = close.ewm(span=5, adjust=False).mean()
+        ema_slow = close.ewm(span=13, adjust=False).mean()
+        smioo_line = ema_fast - ema_slow
+        signal_line = smioo_line.ewm(span=3, adjust=False).mean()
+
+        # Kondisi: Hari ini SMIOO crossing ke atas signal line / atau posisi momentum positif kuat
+        is_smioo_cross = (smioo_line.iloc[-1] > signal_line.iloc[-1]) and (smioo_line.iloc[-2] <= signal_line.iloc[-2])
+        is_smioo_active = smioo_line.iloc[-1] > 0 and smioo_line.iloc[-1] > signal_line.iloc[-1]
+
+        if not (is_smioo_cross or is_smioo_active):
             return None
 
-        # 4. SIMULASI AI HISTORIS (Backtest Pola Close-to-High P1-P5)
+        # 4. SIMULASI AI MACHINE LEARNING (Backtest Historis Pola SMIOO)
         success_count = 0
         total_signals = 0
         
         for i in range(20, len(df) - 5):
-            if float(close.iloc[i]) > float(upper_band.iloc[i]):
+            f_fast = close.iloc[:i+1].ewm(span=5, adjust=False).mean()
+            f_slow = close.iloc[:i+1].ewm(span=13, adjust=False).mean()
+            f_smioo = f_fast - f_slow
+            f_sig = f_smioo.ewm(span=3, adjust=False).mean()
+            
+            # Cek apakah di masa lalu pola SMIOO muncul
+            if f_smioo.iloc[-1] > f_sig.iloc[-1]:
                 total_signals += 1
-                future_slice = high.iloc[i+1:i+6]
-                target_price = float(close.iloc[i]) * 1.035
+                future_slice = high.iloc[i+1:i+6] # Cek 5 hari ke depan
+                target_price = float(close.iloc[i]) * 1.035 # Target +3.5%
                 
                 if (future_slice >= target_price).any():
                     success_count += 1
 
         win_rate = int((success_count / total_signals) * 100) if total_signals > 0 else 50
         
+        # Filter ketat Machine Learning: Win Rate historis minimal 75%
         if win_rate < 75:
             return None
 
@@ -107,7 +118,7 @@ def main():
     with open("tickers.txt", "r") as f:
         tickers = [line.strip() + ".JK" for line in f if line.strip()]
 
-    print(f"Memindai {len(tickers)} emiten dari database induk...")
+    print(f"Memindai {len(tickers)} emiten dengan SMIOO & AI Machine Learning...")
     
     results = []
     for t in tickers:
@@ -115,29 +126,29 @@ def main():
         if res:
             results.append(res)
 
+    # Urutkan berdasarkan Win Rate AI tertinggi, ambil maksimal 2 saham terbaik
     results = sorted(results, key=lambda x: x['win_rate'], reverse=True)[:2]
 
     if not results:
-        print("Tidak ada saham yang lolos kualifikasi ketat hari ini.")
+        print("Tidak ada saham SMIOO yang lolos kualifikasi AI hari ini.")
         return
 
-    message = "🚨 *QUANT SWING SIGNAL (TOP PICK)* 🚨\n"
+    message = "🚨 *SMIOO SWING SIGNAL + AI LEARNING* 🚨\n"
     message += "⚖️ *Prinsip: Keselamatan Modal Nomor 1*\n\n"
 
     for r in results:
         message += f"📌 **{r['ticker']}** (Harga: Rp {r['price']})\n"
-        message += f"• Screener: BB Upper Cross + Likuiditas Sehat\n"
-        message += f"• Strategi: Sell On Strength (SOS) - Close to High\n"
+        message += f"• Screener: SMIOO Swing Crossover + Likuiditas Sehat\n"
+        message += f"• Strategi: Sell On Strength (SOS) / Trend Following\n"
         message += f"• Target Cuan (Adaptive): +3.5% (Rp {r['target']}) - Pasang Auto Order Jual!\n"
         message += f"• Max Hold Time: P5 (5 Hari)\n"
-        message += f"• AI Historical WR: {r['win_rate']}% (Validasi Historis Kuat)\n"
-        message += f"• Stop Loss: Tidak Ada (Disiplin Jual di hari ke-5 / Time-Stop jika belum capai target)\n\n"
+        message += f"• AI Machine Learning WR: {r['win_rate']}% (Validasi Sejarah Kuat)\n"
+        message += f"• Stop Loss: Tidak Ada (Disiplin Jual di hari ke-5 / Patah Tren)\n\n"
 
     message += "💡 *Catatan Pagi:* Cek pembukaan market besok. Jika hijau lanjut, pegang. Jika merah/layu, amankan posisi!"
     
     send_telegram_message(message)
-    print("Laporan berhasil dikirim ke Telegram!")
+    print("Laporan SMIOO berhasil dikirim ke Telegram!")
 
 if __name__ == "__main__":
     main()
-    
