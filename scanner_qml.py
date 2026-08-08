@@ -149,7 +149,7 @@ def get_indicators(df):
     df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
-# ==================== PSAR AGE ====================
+# ==================== PSAR AGE FIXED ====================
 
 def get_psar_age(df):
     """
@@ -160,27 +160,27 @@ def get_psar_age(df):
     if df is None or df.empty or 'PSAR' not in df.columns:
         return 999
     
-    age = 0
+    # Cari dari data paling awal ke akhir
     found_break = False
+    break_index = None
     
-    for i in range(len(df)-1, 0, -1):
+    for i in range(1, len(df)):
         prev = df.iloc[i-1]
         curr = df.iloc[i]
         
         prev_falling = prev['Close'] <= prev['PSAR']
         curr_rising = curr['Close'] > curr['PSAR']
         
-        if not found_break and prev_falling and curr_rising:
+        if prev_falling and curr_rising:
             found_break = True
-            age = 0
-        elif found_break and curr_rising:
-            age += 1
-        elif found_break and not curr_rising:
+            break_index = i
             break
     
     if not found_break:
         return 999
     
+    # Hitung usia dari titik break sampai hari terakhir
+    age = len(df) - 1 - break_index
     return age
 
 # ==================== SCREENER ====================
@@ -235,7 +235,7 @@ def check_break_psar(df, max_psar_age=3):
     if last['RSI'] <= prev['RSI']:
         return None
     
-    # 8. Filter kenaikan: HANYA untuk PSAR Age > 0
+    # 8. Filter tambahan: harga belum naik terlalu jauh (kecuali PSAR Age 0)
     change_from_break = (last['Close'] - prev['Close']) / prev['Close'] * 100
     if psar_age > 0 and change_from_break > 10:
         logger.info(f"SKIP: Harga sudah naik {change_from_break:.1f}% dari PSAR break (PSAR Age: {psar_age})")
