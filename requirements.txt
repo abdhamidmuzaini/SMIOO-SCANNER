@@ -4,4 +4,3 @@ numpy
 requests
 scikit-learn
 pytz
-python-telegram-bot
