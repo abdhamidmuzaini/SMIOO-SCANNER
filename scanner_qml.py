@@ -82,7 +82,7 @@ def get_stock_data(ticker, period='3mo'):
     """
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period=period, adjust=False)  # ← CLOSE BIASA
+        df = stock.history(period=period)  # ← CLOSE BIASA
         if df.empty:
             logger.warning(f"No data for {ticker}")
             return None
