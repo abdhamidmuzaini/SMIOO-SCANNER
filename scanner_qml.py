@@ -1,6 +1,7 @@
 """
 SMIOO-SCANNER - scanner_qml.py
 FULL VERSION - Break Falling PSAR + PSAR Age FIXED + Predictive Score (PF)
+Menggunakan CLOSE biasa (bukan adjusted close)
 """
 
 import os
@@ -72,13 +73,16 @@ def load_tickers(file_path):
         logger.error(f"Error loading tickers: {e}")
         return []
 
-# ==================== DOWNLOAD DATA ====================
+# ==================== DOWNLOAD DATA (CLOSE BIASA) ====================
 
 def get_stock_data(ticker, period='3mo'):
-    """Download data saham dari Yahoo Finance"""
+    """
+    Download data saham dari Yahoo Finance
+    Pakai adjust=False biar dapet CLOSE biasa (bukan adjusted close)
+    """
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period=period)
+        df = stock.history(period=period, adjust=False)  # ← CLOSE BIASA
         if df.empty:
             logger.warning(f"No data for {ticker}")
             return None
@@ -163,7 +167,6 @@ def get_psar_age(df):
     age = 0
     found_break = False
     
-    # Iterasi dari data terakhir ke awal
     for i in range(len(df)-1, 0, -1):
         prev = df.iloc[i-1]
         curr = df.iloc[i]
@@ -172,14 +175,11 @@ def get_psar_age(df):
         curr_rising = curr['Close'] > curr['PSAR']
         
         if not found_break and prev_falling and curr_rising:
-            # Ini hari pertama PSAR berubah dari falling ke rising
             found_break = True
             age = 0
         elif found_break and curr_rising:
-            # PSAR masih rising, tambah age
             age += 1
         elif found_break and not curr_rising:
-            # PSAR udah balik falling lagi
             break
     
     if not found_break:
@@ -202,15 +202,14 @@ def check_break_psar(df, max_psar_age=3):
     
     df = get_indicators(df)
     
-    # Ambil 2 hari terakhir
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. Cek Break Falling PSAR (PSAR berubah dari atas ke bawah)
+    # 1. Cek Break Falling PSAR
     if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
-    # 2. PSAR Age (biar gak kasih sinyal bekas)
+    # 2. PSAR Age
     psar_age = get_psar_age(df)
     logger.info(f"PSAR Age: {psar_age} days")
     
@@ -240,7 +239,12 @@ def check_break_psar(df, max_psar_age=3):
     if last['RSI'] <= prev['RSI']:
         return None
     
-    # Semua lolos
+    # 8. Filter tambahan: harga belum naik terlalu jauh
+    change_from_break = (last['Close'] - prev['Close']) / prev['Close'] * 100
+    if change_from_break > 10:  # kalo udah naik >10% dari break, skip
+        logger.info(f"SKIP: Harga sudah naik {change_from_break:.1f}% dari PSAR break")
+        return None
+    
     return {
         'ticker': None,
         'price': last['Close'],
@@ -250,7 +254,7 @@ def check_break_psar(df, max_psar_age=3):
         'avg_value': avg_value,
         'psar': last['PSAR'],
         'atr': last['ATR'],
-        'change': (last['Close'] - prev['Close']) / prev['Close'] * 100,
+        'change': change_from_break,
         'psar_age': psar_age,
         'date': last.name.strftime('%Y-%m-%d')
     }
