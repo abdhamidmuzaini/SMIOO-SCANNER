@@ -1,6 +1,6 @@
 """
 SMIOO-SCANNER - scanner_qml.py
-FULL VERSION - Break Falling PSAR + PSAR Age + Predictive Score (PF)
+FULL VERSION - Break Falling PSAR + PSAR Age FIXED + Predictive Score (PF)
 """
 
 import os
@@ -99,7 +99,7 @@ def calculate_rsi(series, period=14):
     return rsi
 
 def calculate_psar(df, acceleration=0.02, maximum=0.2):
-    """Hitung Parabolic SAR"""
+    """Hitung Parabolic SAR dengan default 0.02, 0.2"""
     high = df['High']
     low = df['Low']
     close = df['Close']
@@ -146,23 +146,46 @@ def get_indicators(df):
     df['MA50'] = df['Close'].rolling(50).mean()
     df['Volume_MA20'] = df['Volume'].rolling(20).mean()
     df['ATR'] = calculate_atr(df)
-    df['PSAR'] = calculate_psar(df)
+    df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)  # default
     return df
 
-# ==================== SCREENER ====================
+# ==================== PSAR AGE (FIXED) ====================
 
 def get_psar_age(df):
-    """Hitung berapa hari PSAR sudah di atas harga (falling)"""
+    """
+    Hitung berapa hari sejak PSAR berubah dari Falling ke Rising.
+    PSAR Age = 0 hari = baru berubah hari ini.
+    PSAR Age > 3 = sinyal basi.
+    """
     if df is None or df.empty or 'PSAR' not in df.columns:
-        return 0
+        return 999
     
+    # Cari hari pertama PSAR berubah dari falling ke rising
     age = 0
+    found_break = False
+    
     for i in range(len(df)-1, 0, -1):
-        if df.iloc[i]['Close'] < df.iloc[i]['PSAR']:
+        prev_falling = df.iloc[i-1]['Close'] <= df.iloc[i-1]['PSAR']
+        curr_rising = df.iloc[i]['Close'] > df.iloc[i]['PSAR']
+        
+        if not found_break and prev_falling and curr_rising:
+            # Ini hari pertama PSAR berubah
+            found_break = True
+            age = 0
+        elif found_break and curr_rising:
+            # PSAR masih rising
             age += 1
-        else:
+        elif found_break and not curr_rising:
+            # PSAR udah balik falling lagi
             break
+    
+    # Kalo gak ditemukan break, berarti PSAR falling dari awal
+    if not found_break:
+        return 999
+    
     return age
+
+# ==================== SCREENER ====================
 
 def check_break_psar(df, max_psar_age=3):
     """
@@ -181,14 +204,14 @@ def check_break_psar(df, max_psar_age=3):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. PSAR Age (biar gak kasih sinyal bekas)
+    # 1. Cek Break Falling PSAR (PSAR berubah dari atas ke bawah)
+    if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
+        return None
+    
+    # 2. PSAR Age (biar gak kasih sinyal bekas)
     psar_age = get_psar_age(df)
     if psar_age > max_psar_age:
         logger.debug(f"PSAR Age too old: {psar_age} days")
-        return None
-    
-    # 2. Break Falling PSAR (PSAR kemarin di atas harga, hari ini di bawah)
-    if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
     # 3. Price < 1000
@@ -304,10 +327,11 @@ def main():
         ]
         pf_score = predict_pf(model, features)
         
-        # Klasifikasi trade (dengan PSAR Age bonus)
-        psar_bonus = 5 if signal['psar_age'] <= 1 else 0  # sinyal fresh dapet bonus
-        pf_adjusted = min(pf_score + psar_bonus, 100)
+        # Penalti buat sinyal basi: PF turun 10 poin per hari usia
+        psar_penalty = max(0, signal['psar_age'] - 1) * 10
+        pf_adjusted = max(0, pf_score - psar_penalty)
         
+        # Klasifikasi trade
         if pf_adjusted >= 85 and signal['rsi'] > 60 and volume_ratio > 2:
             trade_type = "🔥 FAST TRADE (P1-P3)"
             hold_time = "3 hari"
