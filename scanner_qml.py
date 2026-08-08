@@ -1,6 +1,6 @@
 """
 SMIOO-SCANNER - scanner_qml.py
-BOT ASTA LOGIC + ML (Random Forest) + Q-Learning (Reinforcement Learning)
+FINAL: Bot Asta Logic + PSAR Age + ML + Q-Learning
 """
 
 import os
@@ -13,7 +13,6 @@ import numpy as np
 import yfinance as yf
 import requests
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 import pickle
 import json
 
@@ -37,7 +36,6 @@ logger = logging.getLogger(__name__)
 # ==================== TELEGRAM ====================
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.error("Telegram token or chat ID missing!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
@@ -54,7 +52,6 @@ def send_telegram(message):
 def load_tickers(file_path):
     try:
         if not os.path.exists(file_path):
-            logger.error(f"File {file_path} not found!")
             return []
         with open(file_path, 'r') as f:
             tickers = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -70,7 +67,6 @@ def get_stock_data(ticker, period='3mo'):
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
         if df.empty:
-            logger.warning(f"No data for {ticker}")
             return None
         return df
     except Exception as e:
@@ -119,14 +115,18 @@ def get_indicators(df):
     df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
-# ==================== BOT ASTA LOGIC ====================
-def check_break_psar_bot_asta(df):
-    """
-    Logika Bot Asta:
-    1. PSAR flip (kemarin di atas harga, hari ini di bawah harga)
-    2. Break Line = harga > PSAR kemarin (titik flip)
-    3. Volume > Volume_MA20 * 1.5
-    """
+# ==================== PSAR AGE ====================
+def get_psar_age(df):
+    """Cari hari pertama PSAR di bawah harga"""
+    if df is None or df.empty or 'PSAR' not in df.columns:
+        return 999
+    for i in range(len(df)):
+        if df.iloc[i]['Close'] > df.iloc[i]['PSAR']:
+            return len(df) - 1 - i
+    return 999
+
+# ==================== BOT ASTA LOGIC + PSAR AGE ====================
+def check_break_psar_bot_asta(df, max_psar_age=3):
     if df is None or df.empty or len(df) < 3:
         return None
     
@@ -139,31 +139,37 @@ def check_break_psar_bot_asta(df):
     if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
-    # 2. Break Line
+    # 2. PSAR Age (skip kalo >3 hari)
+    psar_age = get_psar_age(df)
+    if psar_age > max_psar_age:
+        logger.info(f"SKIP: PSAR Age {psar_age} > 3")
+        return None
+    
+    # 3. Break Line
     break_line = prev['PSAR']
     if last['Close'] <= break_line:
         return None
     
-    # 3. Volume > 1.5x MA20
+    # 4. Volume > 1.5x MA20
     volume_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 1
     if volume_ratio < 1.5:
         return None
     
-    # 4. Price < 1000
+    # 5. Price < 1000
     if last['Close'] >= 1000:
         return None
     
-    # 5. Avg Value > 2M
+    # 6. Avg Value > 2M
     avg_value = last['Volume_MA20'] * last['Close']
     if avg_value < 2_000_000_000:
         return None
     
-    # 6. Close < ARA
+    # 7. Close < ARA
     ara = prev['Close'] * 1.20
     if last['Close'] >= ara:
         return None
     
-    # 7. RSI > RSI H-1
+    # 8. RSI > RSI H-1
     if last['RSI'] <= prev['RSI']:
         return None
     
@@ -178,31 +184,26 @@ def check_break_psar_bot_asta(df):
         'change': change,
         'break_line': break_line,
         'volume_ratio': volume_ratio,
+        'psar_age': psar_age,
         'date': last.name.strftime('%Y-%m-%d')
     }
 
-# ==================== MACHINE LEARNING (Random Forest) ====================
+# ==================== MACHINE LEARNING ====================
 def load_or_train_model():
-    """Load model dari file .pkl, kalo gak ada train dari dummy data"""
     try:
         if os.path.exists(MODEL_FILE):
             with open(MODEL_FILE, 'rb') as f:
                 model = pickle.load(f)
             logger.info("Model loaded from model.pkl")
             return model
-        else:
-            logger.warning("model.pkl not found, training dummy model")
-            return train_dummy_model()
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        return train_dummy_model()
+    except:
+        pass
+    return train_dummy_model()
 
 def train_dummy_model():
-    """Training dummy model dengan data acak"""
     np.random.seed(42)
     n = 1000
     X = np.random.rand(n, 5)
-    # Target: 1 = profit > 5%, 0 = loss
     y = (X[:, 0] * 0.3 + X[:, 1] * 0.4 + X[:, 2] * 0.2 > 0.5).astype(int)
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X, y)
@@ -210,101 +211,61 @@ def train_dummy_model():
     return model
 
 def predict_pf(model, features):
-    """Predictive Score (0-100) dari Random Forest"""
     if model is None:
         return 50
     try:
         features = np.array(features).reshape(1, -1)
         proba = model.predict_proba(features)[0][1]
         return int(min(max(proba * 100, 0), 100))
-    except Exception as e:
-        logger.error(f"PF prediction error: {e}")
+    except:
         return 50
 
-# ==================== Q-LEARNING (Reinforcement Learning) ====================
+# ==================== Q-LEARNING ====================
 class QLearning:
-    def __init__(self, actions=['HOLD', 'SELL'], alpha=0.1, gamma=0.9, epsilon=0.2):
-        self.actions = actions
-        self.alpha = alpha
-        self.gamma = gamma
-        self.epsilon = epsilon
+    def __init__(self):
         self.q_table = {}
         self.load_q_table()
     
     def get_state(self, signal):
-        """Buat state dari sinyal"""
-        # State: (rsi_level, volume_level, pf_level)
-        rsi_level = 'high' if signal['rsi'] > 70 else 'mid' if signal['rsi'] > 50 else 'low'
-        vol_level = 'high' if signal['volume_ratio'] > 2 else 'mid' if signal['volume_ratio'] > 1 else 'low'
-        pf_level = 'high' if signal['pf'] > 80 else 'mid' if signal['pf'] > 60 else 'low'
-        return f"{rsi_level}_{vol_level}_{pf_level}"
+        rsi = 'high' if signal['rsi'] > 70 else 'mid' if signal['rsi'] > 50 else 'low'
+        vol = 'high' if signal['volume_ratio'] > 2 else 'mid' if signal['volume_ratio'] > 1 else 'low'
+        pf = 'high' if signal['pf'] > 80 else 'mid' if signal['pf'] > 60 else 'low'
+        return f"{rsi}_{vol}_{pf}"
     
     def get_action(self, state):
-        """Pilih aksi berdasarkan Q-Table"""
+        actions = ['HOLD', 'SELL']
         if state not in self.q_table:
-            self.q_table[state] = {a: 0 for a in self.actions}
-        
-        if np.random.random() < self.epsilon:
-            return np.random.choice(self.actions)  # Eksplorasi
-        else:
-            # Eksploitasi: pilih aksi dengan nilai tertinggi
-            return max(self.q_table[state], key=self.q_table[state].get)
-    
-    def update(self, state, action, reward, next_state):
-        """Update Q-Table dengan Q-Learning"""
-        if state not in self.q_table:
-            self.q_table[state] = {a: 0 for a in self.actions}
-        if next_state not in self.q_table:
-            self.q_table[next_state] = {a: 0 for a in self.actions}
-        
-        current_q = self.q_table[state][action]
-        max_next_q = max(self.q_table[next_state].values())
-        new_q = current_q + self.alpha * (reward + self.gamma * max_next_q - current_q)
-        self.q_table[state][action] = new_q
-        
-        self.save_q_table()
-    
-    def get_recommendation(self, signal):
-        """Kasih rekomendasi HOLD atau SELL"""
-        state = self.get_state(signal)
-        action = self.get_action(state)
-        return action
+            self.q_table[state] = {a: 0 for a in actions}
+        # Pilih aksi dengan nilai tertinggi
+        return max(self.q_table[state], key=self.q_table[state].get)
     
     def load_q_table(self):
-        """Load Q-Table dari file JSON"""
         if os.path.exists(Q_TABLE_FILE):
             try:
                 with open(Q_TABLE_FILE, 'r') as f:
                     self.q_table = json.load(f)
-                logger.info("Q-Table loaded")
             except:
                 self.q_table = {}
     
     def save_q_table(self):
-        """Save Q-Table ke file JSON"""
         try:
             with open(Q_TABLE_FILE, 'w') as f:
                 json.dump(self.q_table, f)
-        except Exception as e:
-            logger.error(f"Error saving Q-Table: {e}")
+        except:
+            pass
 
 # ==================== MAIN ====================
 def main():
     logger.info(f"Starting SMIOO-SCANNER at {NOW}")
     
-    # 1. Load tickers
     tickers = load_tickers(TICKER_FILE)
     if not tickers:
         send_telegram(f"❌ {NOW} - tickers.txt tidak ditemukan!")
         return
     
-    # 2. Load ML model
     model = load_or_train_model()
-    
-    # 3. Init Q-Learning
     ql = QLearning()
     
-    # 4. Screening
     results = []
     for ticker in tickers:
         logger.info(f"Scanning {ticker}...")
@@ -312,11 +273,10 @@ def main():
         if df is None or df.empty:
             continue
         
-        signal = check_break_psar_bot_asta(df)
+        signal = check_break_psar_bot_asta(df, max_psar_age=3)
         if signal is None:
             continue
         
-        # Hitung PF (ML)
         features = [
             signal['rsi'] / 100,
             signal['volume_ratio'] / 5,
@@ -324,47 +284,44 @@ def main():
             signal['price'] / 1000,
             signal['avg_value'] / 10_000_000_000
         ]
-        pf_score = predict_pf(model, features)
-        signal['pf'] = pf_score
+        pf = predict_pf(model, features)
+        signal['pf'] = pf
         
-        # Q-Learning: rekomendasi HOLD atau SELL
-        recommendation = ql.get_recommendation(signal)
+        state = ql.get_state(signal)
+        ql_action = ql.get_action(state)
         
         results.append({
             'ticker': ticker.replace('.JK', ''),
             'price': signal['price'],
             'rsi': signal['rsi'],
             'change': signal['change'],
-            'pf': pf_score,
+            'pf': pf,
             'volume_ratio': signal['volume_ratio'],
             'avg_value_b': signal['avg_value'] / 1_000_000_000,
             'break_line': signal['break_line'],
-            'recommendation': recommendation,
+            'psar_age': signal['psar_age'],
+            'ql_action': ql_action,
             'date': signal['date']
         })
     
     results.sort(key=lambda x: x['pf'], reverse=True)
     
-    # 5. Kirim ke Telegram
     if not results:
-        msg = f"📭 *{NOW}*\nTidak ada sinyal Break PSAR hari ini."
-        send_telegram(msg)
-        logger.info("No signals found")
+        send_telegram(f"📭 *{NOW}*\nTidak ada sinyal Break PSAR hari ini.")
         return
     
-    msg = f"📈 *SMIOO-SCANNER (BOT ASTA + ML + QL) - {NOW}*\n"
+    msg = f"📈 *SMIOO-SCANNER (FINAL) - {NOW}*\n"
     msg += f"Total Sinyal: {len(results)}\n"
     msg += "==============================\n\n"
     
     for r in results:
         msg += f"*{r['ticker']}* ({r['price']:.0f}) | PF: {r['pf']} | RSI: {r['rsi']:.0f}\n"
         msg += f"  Δ: {r['change']:.1f}% | Vol: {r['volume_ratio']:.1f}x | Avg: {r['avg_value_b']:.1f}B\n"
-        msg += f"  Break Line: {r['break_line']:.0f}\n"
-        msg += f"  QL: *{r['recommendation']}*\n"
+        msg += f"  PSAR Age: {r['psar_age']} | QL: *{r['ql_action']}*\n"
         msg += f"  Target: {r['price'] * 1.06:.0f} (+6%) | Hold: 3 hari\n\n"
     
     msg += "==============================\n"
-    msg += "⚠️ *Tetap DYOR!* Hasil hanya referensi awal."
+    msg += "⚠️ *Tetap DYOR!*"
     
     send_telegram(msg)
     logger.info(f"Done. {len(results)} signals found.")
