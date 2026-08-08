@@ -2,7 +2,7 @@ name: Scanner - QML
 
 on:
   schedule:
-    - cron: '50 8 * * 1-5'  # 16:50 WITA (08:50 UTC), Senin-Jumat
+    - cron: '50 8 * * 1-5'  # 16:50 WITA
   workflow_dispatch:
 
 jobs:
@@ -21,10 +21,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install yfinance pandas numpy requests python-telegram-bot
+          pip install -r requirements.txt
 
       - name: Run scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python scanner_qml.py  # ← INI YANG DIUBAH
+        run: python scanner_qml.py
