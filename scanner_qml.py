@@ -1,13 +1,13 @@
 """
 SMIOO-SCANNER - scanner_qml.py
-HARDCORE VERSION - Pukul Batu
+BOT ASTA LOGIC - Break Line + Volume Confirmation
 """
 
 import os
 import sys
 import logging
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # ==================== TELEGRAM ====================
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.error("Telegram token or chat ID missing!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
@@ -115,14 +116,17 @@ def get_indicators(df):
     df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
-# ==================== SCREENER ====================
-def check_break_psar(df):
+# ==================== BOT ASTA LOGIC ====================
+
+def check_break_psar_bot_asta(df):
     """
-    Break PSAR + Hard Filter:
-    - PSAR berubah dari atas ke bawah
-    - Harga belum naik >5% dalam 5 hari terakhir (BIAR SKIP SINYAL BASI!)
+    Logika Bot Asta:
+    1. PSAR flip (kemarin di atas harga, hari ini di bawah harga)
+    2. Break Line = harga > PSAR kemarin (titik flip)
+    3. Volume > Volume_MA20 * 1.5 (konfirmasi volume)
+    4. Filter harga, ARA, RSI, dll
     """
-    if df is None or df.empty or len(df) < 10:
+    if df is None or df.empty or len(df) < 3:
         return None
     
     df = get_indicators(df)
@@ -130,34 +134,34 @@ def check_break_psar(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. Cek Break Falling PSAR
+    # 1. PSAR flip (kemarin di atas harga, hari ini di bawah harga)
     if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
-    # 2. HARDCORE FILTER: Harga naik >5% dalam 5 hari terakhir
-    # Kalo udah naik >5% dalam 5 hari, SKIP (karena udah basi)
-    price_5_days_ago = df.iloc[-6]['Close']
-    change_5d = (last['Close'] - price_5_days_ago) / price_5_days_ago * 100
-    if change_5d > 5:
-        logger.info(f"SKIP: Harga naik {change_5d:.1f}% dalam 5 hari (basi)")
+    # 2. Break Line = harga > PSAR kemarin (titik flip)
+    break_line = prev['PSAR']
+    if last['Close'] <= break_line:
+        logger.info("SKIP: Harga tidak menembus Break Line")
         return None
     
-    # 3. Price < 1000
+    # 3. Volume > Volume_MA20 * 1.5 (konfirmasi volume)
+    volume_ratio = last['Volume'] / last['Volume_MA20'] if last['Volume_MA20'] > 0 else 1
+    if volume_ratio < 1.5:
+        logger.info(f"SKIP: Volume rendah ({volume_ratio:.1f}x)")
+        return None
+    
+    # 4. Price < 1000
     if last['Close'] >= 1000:
         return None
     
-    # 4. Avg Value 20H > 2 Miliar
+    # 5. Avg Value 20H > 2 Miliar
     avg_value = last['Volume_MA20'] * last['Close']
     if avg_value < 2_000_000_000:
         return None
     
-    # 5. Close < ARA
+    # 6. Close < ARA
     ara = prev['Close'] * 1.20
     if last['Close'] >= ara:
-        return None
-    
-    # 6. Volume > Volume H-1
-    if last['Volume'] <= prev['Volume']:
         return None
     
     # 7. RSI > RSI H-1
@@ -173,6 +177,8 @@ def check_break_psar(df):
         'volume_ma20': last['Volume_MA20'],
         'avg_value': avg_value,
         'change': change,
+        'break_line': break_line,
+        'volume_ratio': volume_ratio,
         'date': last.name.strftime('%Y-%m-%d')
     }
 
@@ -192,7 +198,7 @@ def main():
         if df is None or df.empty:
             continue
         
-        signal = check_break_psar(df)
+        signal = check_break_psar_bot_asta(df)
         if signal is None:
             continue
         
@@ -209,8 +215,9 @@ def main():
             'rsi': signal['rsi'],
             'change': signal['change'],
             'pf': pf_score,
-            'volume_ratio': signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 1,
+            'volume_ratio': signal['volume_ratio'],
             'avg_value_b': signal['avg_value'] / 1_000_000_000,
+            'break_line': signal['break_line'],
             'date': signal['date']
         })
     
@@ -222,13 +229,14 @@ def main():
         logger.info("No signals found")
         return
     
-    msg = f"📈 *SMIOO-SCANNER - {NOW}*\n"
+    msg = f"📈 *SMIOO-SCANNER (BOT ASTA LOGIC) - {NOW}*\n"
     msg += f"Total Sinyal: {len(results)}\n"
     msg += "==============================\n\n"
     
     for r in results:
         msg += f"*{r['ticker']}* ({r['price']:.0f}) | PF: {r['pf']} | RSI: {r['rsi']:.0f}\n"
-        msg += f"  Δ: {r['change']:.1f}% | Vol Ratio: {r['volume_ratio']:.1f}x | Avg: {r['avg_value_b']:.1f}B\n"
+        msg += f"  Δ: {r['change']:.1f}% | Vol: {r['volume_ratio']:.1f}x | Avg: {r['avg_value_b']:.1f}B\n"
+        msg += f"  Break Line: {r['break_line']:.0f}\n"
         msg += f"  Target: {r['price'] * 1.06:.0f} (+6%) | Hold: 3 hari\n\n"
     
     msg += "==============================\n"
