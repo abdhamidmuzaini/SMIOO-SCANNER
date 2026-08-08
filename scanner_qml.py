@@ -146,7 +146,7 @@ def get_indicators(df):
     df['MA50'] = df['Close'].rolling(50).mean()
     df['Volume_MA20'] = df['Volume'].rolling(20).mean()
     df['ATR'] = calculate_atr(df)
-    df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)  # default
+    df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
 # ==================== PSAR AGE (FIXED) ====================
@@ -160,26 +160,28 @@ def get_psar_age(df):
     if df is None or df.empty or 'PSAR' not in df.columns:
         return 999
     
-    # Cari hari pertama PSAR berubah dari falling ke rising
     age = 0
     found_break = False
     
+    # Iterasi dari data terakhir ke awal
     for i in range(len(df)-1, 0, -1):
-        prev_falling = df.iloc[i-1]['Close'] <= df.iloc[i-1]['PSAR']
-        curr_rising = df.iloc[i]['Close'] > df.iloc[i]['PSAR']
+        prev = df.iloc[i-1]
+        curr = df.iloc[i]
+        
+        prev_falling = prev['Close'] <= prev['PSAR']
+        curr_rising = curr['Close'] > curr['PSAR']
         
         if not found_break and prev_falling and curr_rising:
-            # Ini hari pertama PSAR berubah
+            # Ini hari pertama PSAR berubah dari falling ke rising
             found_break = True
             age = 0
         elif found_break and curr_rising:
-            # PSAR masih rising
+            # PSAR masih rising, tambah age
             age += 1
         elif found_break and not curr_rising:
             # PSAR udah balik falling lagi
             break
     
-    # Kalo gak ditemukan break, berarti PSAR falling dari awal
     if not found_break:
         return 999
     
@@ -210,8 +212,10 @@ def check_break_psar(df, max_psar_age=3):
     
     # 2. PSAR Age (biar gak kasih sinyal bekas)
     psar_age = get_psar_age(df)
+    logger.info(f"PSAR Age: {psar_age} days")
+    
     if psar_age > max_psar_age:
-        logger.debug(f"PSAR Age too old: {psar_age} days")
+        logger.info(f"SKIP: PSAR Age too old: {psar_age} days")
         return None
     
     # 3. Price < 1000
@@ -238,7 +242,7 @@ def check_break_psar(df, max_psar_age=3):
     
     # Semua lolos
     return {
-        'ticker': None,  # diisi di main
+        'ticker': None,
         'price': last['Close'],
         'rsi': last['RSI'],
         'volume': last['Volume'],
@@ -296,16 +300,13 @@ def predict_pf(model, features):
 def main():
     logger.info(f"Starting SMIOO-SCANNER at {NOW}")
     
-    # 1. Load tickers
     tickers = load_tickers(TICKER_FILE)
     if not tickers:
         send_telegram(f"❌ {NOW} - tickers.txt tidak ditemukan!")
         return
     
-    # 2. Load model PF
     model = load_model()
     
-    # 3. Screening
     results = []
     for ticker in tickers:
         logger.info(f"Scanning {ticker}...")
@@ -313,11 +314,10 @@ def main():
         if df is None or df.empty:
             continue
         
-        signal = check_break_psar(df, max_psar_age=3)  # max 3 hari
+        signal = check_break_psar(df, max_psar_age=3)
         if signal is None:
             continue
         
-        # Hitung PF
         volume_ratio = signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 1
         features = [
             signal['rsi'] / 100,
@@ -327,11 +327,9 @@ def main():
         ]
         pf_score = predict_pf(model, features)
         
-        # Penalti buat sinyal basi: PF turun 10 poin per hari usia
         psar_penalty = max(0, signal['psar_age'] - 1) * 10
         pf_adjusted = max(0, pf_score - psar_penalty)
         
-        # Klasifikasi trade
         if pf_adjusted >= 85 and signal['rsi'] > 60 and volume_ratio > 2:
             trade_type = "🔥 FAST TRADE (P1-P3)"
             hold_time = "3 hari"
@@ -341,7 +339,7 @@ def main():
             hold_time = "7 hari"
             tp = 10
         else:
-            continue  # skip sinyal jelek
+            continue
         
         results.append({
             'ticker': ticker.replace('.JK', ''),
@@ -358,10 +356,8 @@ def main():
             'date': signal['date']
         })
     
-    # 4. Sort by PF
     results.sort(key=lambda x: x['pf'], reverse=True)
     
-    # 5. Kirim ke Telegram
     if not results:
         msg = f"📭 *{NOW}*\nTidak ada sinyal Break Falling PSAR hari ini."
         send_telegram(msg)
