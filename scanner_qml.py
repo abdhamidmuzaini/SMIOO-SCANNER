@@ -1,7 +1,6 @@
 """
 SMIOO-SCANNER - scanner_qml.py
-Strategi: Break Falling PSAR + Filter Teknikal + Predictive Score (PF)
-Output: Rekomendasi Fast Trade / Max Profit ke Telegram
+Full Version - Break Falling PSAR + Predictive Score (PF) + Filter Teknikal
 """
 
 import os
@@ -9,16 +8,12 @@ import sys
 import logging
 import pytz
 from datetime import datetime, timedelta
-import time
-import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from telegram import Bot
-from telegram.error import TelegramError
-import pickle
+import requests
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+import pickle
 
 # ==================== KONFIGURASI ====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -27,28 +22,56 @@ CHAT_ID = os.getenv("CHAT_ID")
 WITA = pytz.timezone('Asia/Makassar')
 NOW = datetime.now(WITA).strftime('%Y-%m-%d %H:%M:%S WITA')
 
-# File daftar saham
 TICKER_FILE = "tickers.txt"
 
-# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ==================== FUNGSI BANTUAN ====================
+# ==================== TELEGRAM ====================
+
+def send_telegram(message):
+    """Kirim pesan ke Telegram"""
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.error("Telegram token or chat ID missing!")
+        return
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code == 200:
+            logger.info("Telegram message sent")
+        else:
+            logger.error(f"Telegram error: {r.text}")
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
+
+# ==================== LOAD TICKERS ====================
 
 def load_tickers(file_path):
     """Baca daftar saham dari tickers.txt"""
     try:
+        if not os.path.exists(file_path):
+            logger.error(f"File {file_path} not found!")
+            return []
+        
         with open(file_path, 'r') as f:
-            tickers = [line.strip() for line in f if line.strip()]
+            tickers = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        
         logger.info(f"Loaded {len(tickers)} tickers from {file_path}")
         return tickers
-    except FileNotFoundError:
-        logger.error(f"File {file_path} not found!")
+    except Exception as e:
+        logger.error(f"Error loading tickers: {e}")
         return []
+
+# ==================== DOWNLOAD DATA ====================
 
 def get_stock_data(ticker, period='3mo'):
     """Download data saham dari Yahoo Finance"""
@@ -63,217 +86,163 @@ def get_stock_data(ticker, period='3mo'):
         logger.error(f"Error downloading {ticker}: {e}")
         return None
 
+# ==================== INDIKATOR TEKNIKAL ====================
+
+def calculate_rsi(series, period=14):
+    """Hitung RSI"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def calculate_psar(df, acceleration=0.02, maximum=0.2):
     """Hitung Parabolic SAR"""
-    try:
-        high = df['High']
-        low = df['Low']
-        close = df['Close']
-        
-        psar = high.copy()
-        psar_bull = True
-        af = acceleration
-        ep = low.iloc[0] if psar_bull else high.iloc[0]
-        psar.iloc[0] = close.iloc[0]
-        
-        for i in range(1, len(df)):
-            if psar_bull:
-                psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
-                if low.iloc[i] <= psar.iloc[i]:
-                    psar_bull = False
-                    psar.iloc[i] = ep
-                    af = acceleration
-                    ep = low.iloc[i]
-            else:
-                psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
-                if high.iloc[i] >= psar.iloc[i]:
-                    psar_bull = True
-                    psar.iloc[i] = ep
-                    af = acceleration
-                    ep = high.iloc[i]
-        
-        return psar
-    except Exception as e:
-        logger.error(f"PSAR calculation error: {e}")
-        return None
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    
+    psar = high.copy()
+    psar_bull = True
+    af = acceleration
+    ep = low.iloc[0] if psar_bull else high.iloc[0]
+    psar.iloc[0] = close.iloc[0]
+    
+    for i in range(1, len(df)):
+        if psar_bull:
+            psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
+            if low.iloc[i] <= psar.iloc[i]:
+                psar_bull = False
+                psar.iloc[i] = ep
+                af = acceleration
+                ep = low.iloc[i]
+        else:
+            psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
+            if high.iloc[i] >= psar.iloc[i]:
+                psar_bull = True
+                psar.iloc[i] = ep
+                af = acceleration
+                ep = high.iloc[i]
+    
+    return psar
 
-def calculate_indicators(df):
-    """Hitung indikator teknikal: RSI, MA, Volume, ATR"""
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # Moving Average
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA50'] = df['Close'].rolling(window=50).mean()
-    
-    # Volume MA20 (buat rata-rata transaksi 20 hari)
-    df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
-    
-    # ATR
+def calculate_atr(df, period=14):
+    """Hitung ATR"""
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
-    df['ATR'] = true_range.rolling(14).mean()
-    
+    atr = true_range.rolling(period).mean()
+    return atr
+
+def get_indicators(df):
+    """Hitung semua indikator"""
+    df = df.copy()
+    df['RSI'] = calculate_rsi(df['Close'])
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['MA50'] = df['Close'].rolling(50).mean()
+    df['Volume_MA20'] = df['Volume'].rolling(20).mean()
+    df['ATR'] = calculate_atr(df)
+    df['PSAR'] = calculate_psar(df)
     return df
 
-def get_break_psar_signal(df):
+# ==================== SCREENER ====================
+
+def check_break_psar(df):
     """
-    Deteksi Break Falling PSAR:
-    - PSAR sebelumnya di atas harga (trend turun)
+    Cek Break Falling PSAR:
+    - PSAR kemarin di atas harga (trend turun)
     - PSAR hari ini di bawah harga (trend naik)
-    - Ini sinyal 'break' dari falling ke rising
+    + semua filter tambahan
     """
     if df is None or df.empty or len(df) < 3:
         return None
     
-    df = calculate_indicators(df)
-    df['PSAR'] = calculate_psar(df)
-    
-    if df['PSAR'] is None:
-        return None
+    df = get_indicators(df)
     
     # Ambil 2 hari terakhir
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # CEK BREAK FALLING PSAR:
-    # Kondisi 1: PSAR kemarin di ATAS harga (trend turun)
-    # Kondisi 2: PSAR hari ini di BAWAH harga (trend naik)
-    psar_break = (prev['Close'] <= prev['PSAR']) and (last['Close'] > last['PSAR'])
-    
-    if not psar_break:
+    # 1. Break Falling PSAR
+    if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
-    # Filter tambahan (dari screener lo)
-    # 1. Price < 1000
+    # 2. Price < 1000
     if last['Close'] >= 1000:
         return None
     
-    # 2. Avg Value 20H > 2 Miliar (dari Volume_MA20)
-    avg_value = last['Volume_MA20'] * last['Close']  # dalam Rupiah
-    if avg_value < 2_000_000_000:  # 2 Miliar
+    # 3. Avg Value 20H > 2 Miliar
+    avg_value = last['Volume_MA20'] * last['Close']
+    if avg_value < 2_000_000_000:
         return None
     
-    # 3. Close < ARA (harga belum mentok di batas atas)
-    # ARA = harga penutupan kemarin * 1.20 (untuk saham biasa)
+    # 4. Close < ARA (20% dari harga sebelumnya)
     ara = prev['Close'] * 1.20
     if last['Close'] >= ara:
         return None
     
-    # 4. Volume > Volume H-1
+    # 5. Volume > Volume H-1
     if last['Volume'] <= prev['Volume']:
         return None
     
-    # 5. RSI > RSI H-1
+    # 6. RSI > RSI H-1
     if last['RSI'] <= prev['RSI']:
         return None
     
-    # Semua filter lolos!
+    # Semua lolos
     return {
-        'signal': 'BUY',
+        'ticker': None,  # diisi di main
         'price': last['Close'],
-        'psar': last['PSAR'],
         'rsi': last['RSI'],
         'volume': last['Volume'],
         'volume_ma20': last['Volume_MA20'],
         'avg_value': avg_value,
-        'close_to_ma50': (last['Close'] - last['MA50']) / last['MA50'] * 100 if not pd.isna(last['MA50']) else 0,
+        'psar': last['PSAR'],
         'atr': last['ATR'],
-        'change': (last['Close'] - prev['Close']) / prev['Close'] * 100
+        'change': (last['Close'] - prev['Close']) / prev['Close'] * 100,
+        'date': last.name.strftime('%Y-%m-%d')
     }
 
+# ==================== PREDICTIVE SCORE (PF) ====================
+
 def train_rf_model():
-    """Training model Random Forest untuk PF (Predictive Score)"""
-    # Data dummy (nanti ganti dengan data backtest lo)
+    """Training model Random Forest untuk PF"""
+    # Data dummy (nanti diganti dengan data backtest lo)
     np.random.seed(42)
-    n_samples = 700
-    
-    # Fitur: RSI, Volume_Ratio, Close_to_MA50, ATR
-    X = np.random.rand(n_samples, 4)
+    n = 700
+    X = np.random.rand(n, 4)
     y = (X[:, 0] * 0.3 + X[:, 1] * 0.4 + X[:, 2] * 0.2 > 0.5).astype(int)
     
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X, y)
-    
     return model
 
 def predict_pf(model, features):
-    """Prediksi Predictive Score (PF)"""
+    """Hitung Predictive Score (0-100)"""
     if model is None:
         return 50
-    
     features = np.array(features).reshape(1, -1)
     proba = model.predict_proba(features)[0][1]
-    pf_score = int(proba * 100)
-    return min(max(pf_score, 0), 100)
-
-def classify_trade(pf_score, rsi, volume_ratio, avg_value):
-    """Klasifikasi Fast Trade vs Max Profit"""
-    # Fast Trade: PF > 85, RSI > 60, Volume > 2x MA, Avg Value > 5M
-    if pf_score > 85 and rsi > 60 and volume_ratio > 2 and avg_value > 5_000_000_000:
-        return "🔥 FAST TRADE (P1-P3)", "3 hari", 6
-    # Max Profit: PF 70-85, RSI 40-60, volume normal
-    elif pf_score >= 70 and 40 <= rsi <= 60:
-        return "🟡 MAX PROFIT (P4-P7)", "7 hari", 10
-    # Skip: PF < 70
-    else:
-        return "🔴 SKIP", "-", 0
-
-def send_telegram(message):
-    """Kirim pesan ke Telegram"""
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.error("TELEGRAM_TOKEN or CHAT_ID not set!")
-        return
-    
-    try:
-        bot = Bot(token=TELEGRAM_TOKEN)
-        bot.send_message(chat_id=CHAT_ID, text=message)
-        logger.info("Message sent to Telegram")
-    except TelegramError as e:
-        logger.error(f"Telegram error: {e}")
-
-def send_results_to_telegram(results):
-    """Format dan kirim hasil screening ke Telegram"""
-    if not results:
-        send_telegram(f"📭 *{NOW}* - Tidak ada sinyal PSAR hari ini.")
-        return
-    
-    message = f"📈 *SMIOO-SCANNER - {NOW}*\n"
-    message += f"Total Sinyal: {len(results)}\n"
-    message += "="*30 + "\n\n"
-    
-    for r in results:
-        message += f"*{r['ticker']}* ({r['price']:.0f}) | PF: {r['pf_score']} | RSI: {r['rsi']:.0f} | Δ: {r['change']:.1f}%\n"
-        message += f"  {r['trade_type']}\n"
-        if r['tp'] > 0:
-            message += f"  Target: {r['price'] * (1 + r['tp']/100):.0f} (+{r['tp']}%) | Hold: {r['hold_time']}\n"
-        message += "\n"
-    
-    message += "="*30 + "\n"
-    message += "⚠️ *Tetap DYOR!* Hasil hanya referensi awal.\n"
-    
-    send_telegram(message)
+    return int(min(max(proba * 100, 0), 100))
 
 # ==================== MAIN ====================
 
 def main():
     logger.info(f"Starting SMIOO-SCANNER at {NOW}")
     
+    # 1. Load tickers
     tickers = load_tickers(TICKER_FILE)
     if not tickers:
-        logger.error("No tickers loaded. Exiting.")
+        send_telegram(f"❌ {NOW} - tickers.txt tidak ditemukan!")
         return
     
-    # Load/Train RF model (nanti ganti pake model .pkl)
+    # 2. Load / Train model PF
     model = train_rf_model()
     
+    # 3. Screening
     results = []
     for ticker in tickers:
         logger.info(f"Scanning {ticker}...")
@@ -281,51 +250,72 @@ def main():
         if df is None or df.empty:
             continue
         
-        signal = get_break_psar_signal(df)
+        signal = check_break_psar(df)
         if signal is None:
             continue
         
-        # Hitung PF (Predictive Score)
-        volume_ratio = signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 0
+        # Hitung PF
+        volume_ratio = signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 1
         features = [
             signal['rsi'] / 100,
             volume_ratio / 5,
-            signal['close_to_ma50'] / 20,
-            signal['atr'] / 100 if signal['atr'] > 0 else 0
+            signal['change'] / 10,
+            signal['atr'] / 100 if signal['atr'] > 0 else 0.01
         ]
         pf_score = predict_pf(model, features)
         
         # Klasifikasi trade
-        trade_type, hold_time, tp_percent = classify_trade(
-            pf_score,
-            signal['rsi'],
-            volume_ratio,
-            signal['avg_value']
-        )
-        
-        # Skip kalo trade_type = SKIP
-        if trade_type == "🔴 SKIP":
-            continue
+        if pf_score >= 85 and signal['rsi'] > 60 and volume_ratio > 2:
+            trade_type = "🔥 FAST TRADE (P1-P3)"
+            hold_time = "3 hari"
+            tp = 6
+        elif pf_score >= 70 and 40 <= signal['rsi'] <= 60:
+            trade_type = "🟡 MAX PROFIT (P4-P7)"
+            hold_time = "7 hari"
+            tp = 10
+        else:
+            continue  # skip sinyal jelek
         
         results.append({
             'ticker': ticker.replace('.JK', ''),
             'price': signal['price'],
-            'pf_score': pf_score,
             'rsi': signal['rsi'],
             'change': signal['change'],
+            'pf': pf_score,
+            'volume_ratio': volume_ratio,
+            'avg_value_b': signal['avg_value'] / 1_000_000_000,
             'trade_type': trade_type,
             'hold_time': hold_time,
-            'tp': tp_percent,
-            'avg_value': signal['avg_value'] / 1_000_000_000  # dalam Miliar
+            'tp': tp,
+            'date': signal['date']
         })
     
-    # Sort by PF (descending)
-    results.sort(key=lambda x: x['pf_score'], reverse=True)
+    # 4. Sort by PF
+    results.sort(key=lambda x: x['pf'], reverse=True)
     
-    # Kirim ke Telegram
-    send_results_to_telegram(results)
+    # 5. Kirim ke Telegram
+    if not results:
+        msg = f"📭 *{NOW}*\nTidak ada sinyal Break Falling PSAR hari ini."
+        send_telegram(msg)
+        logger.info("No signals found")
+        return
     
-    logger.info(f"Scanning completed. {len(results)} signals found.")
+    msg = f"📈 *SMIOO-SCANNER - {NOW}*\n"
+    msg += f"Total Sinyal: {len(results)}\n"
+    msg += "="*30 + "\n\n"
+    
+    for r in results:
+        msg += f"*{r['ticker']}* ({r['price']:.0f}) | PF: {r['pf']} | RSI: {r['rsi']:.0f}\n"
+        msg += f"  Δ: {r['change']:.1f}% | Vol Ratio: {r['volume_ratio']:.1f}x | Avg: {r['avg_value_b']:.1f}B\n"
+        msg += f"  {r['trade_type']}\n"
+        msg += f"  Target: {r['price'] * (1 + r['tp']/100):.0f} (+{r['tp']}%) | Hold: {r['hold_time']}\n"
+        msg += "\n"
+    
+    msg += "="*30 + "\n"
+    msg += "⚠️ *Tetap DYOR!* Hasil hanya referensi awal."
+    
+    send_telegram(msg)
+    logger.info(f"Done. {len(results)} signals found.")
 
 if __name__ == "__main__":
     main()
