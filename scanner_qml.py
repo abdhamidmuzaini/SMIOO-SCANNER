@@ -1,7 +1,6 @@
 """
 SMIOO-SCANNER - scanner_qml.py
 FULL VERSION - Break Falling PSAR + PSAR Age FIXED + Predictive Score (PF)
-Menggunakan CLOSE biasa (bukan adjusted close)
 """
 
 import os
@@ -73,16 +72,13 @@ def load_tickers(file_path):
         logger.error(f"Error loading tickers: {e}")
         return []
 
-# ==================== DOWNLOAD DATA (CLOSE BIASA) ====================
+# ==================== DOWNLOAD DATA ====================
 
 def get_stock_data(ticker, period='3mo'):
-    """
-    Download data saham dari Yahoo Finance
-    Pakai adjust=False biar dapet CLOSE biasa (bukan adjusted close)
-    """
+    """Download data saham dari Yahoo Finance"""
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period=period)  # ← CLOSE BIASA
+        df = stock.history(period=period)
         if df.empty:
             logger.warning(f"No data for {ticker}")
             return None
@@ -153,7 +149,7 @@ def get_indicators(df):
     df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
-# ==================== PSAR AGE (FIXED) ====================
+# ==================== PSAR AGE ====================
 
 def get_psar_age(df):
     """
@@ -239,10 +235,10 @@ def check_break_psar(df, max_psar_age=3):
     if last['RSI'] <= prev['RSI']:
         return None
     
-    # 8. Filter tambahan: harga belum naik terlalu jauh
+    # 8. Filter kenaikan: HANYA untuk PSAR Age > 0
     change_from_break = (last['Close'] - prev['Close']) / prev['Close'] * 100
-    if change_from_break > 10:  # kalo udah naik >10% dari break, skip
-        logger.info(f"SKIP: Harga sudah naik {change_from_break:.1f}% dari PSAR break")
+    if psar_age > 0 and change_from_break > 10:
+        logger.info(f"SKIP: Harga sudah naik {change_from_break:.1f}% dari PSAR break (PSAR Age: {psar_age})")
         return None
     
     return {
