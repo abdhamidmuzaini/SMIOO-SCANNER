@@ -1,13 +1,13 @@
 """
 SMIOO-SCANNER - scanner_qml.py
-FULL VERSION - Break Falling PSAR + PSAR Age FIXED + Predictive Score (PF)
+HARDCORE VERSION - Pukul Batu
 """
 
 import os
 import sys
 import logging
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -32,19 +32,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== TELEGRAM ====================
-
 def send_telegram(message):
-    """Kirim pesan ke Telegram pake requests (sync)"""
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.error("Telegram token or chat ID missing!")
         return
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         r = requests.post(url, data=payload, timeout=10)
         if r.status_code == 200:
@@ -55,17 +47,13 @@ def send_telegram(message):
         logger.error(f"Telegram error: {e}")
 
 # ==================== LOAD TICKERS ====================
-
 def load_tickers(file_path):
-    """Baca daftar saham dari tickers.txt"""
     try:
         if not os.path.exists(file_path):
             logger.error(f"File {file_path} not found!")
             return []
-        
         with open(file_path, 'r') as f:
             tickers = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        
         logger.info(f"Loaded {len(tickers)} tickers from {file_path}")
         return tickers
     except Exception as e:
@@ -73,9 +61,7 @@ def load_tickers(file_path):
         return []
 
 # ==================== DOWNLOAD DATA ====================
-
 def get_stock_data(ticker, period='3mo'):
-    """Download data saham dari Yahoo Finance"""
     try:
         stock = yf.Ticker(ticker)
         df = stock.history(period=period)
@@ -87,10 +73,8 @@ def get_stock_data(ticker, period='3mo'):
         logger.error(f"Error downloading {ticker}: {e}")
         return None
 
-# ==================== INDIKATOR TEKNIKAL ====================
-
+# ==================== INDIKATOR ====================
 def calculate_rsi(series, period=14):
-    """Hitung RSI"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -99,17 +83,12 @@ def calculate_rsi(series, period=14):
     return rsi
 
 def calculate_psar(df, acceleration=0.02, maximum=0.2):
-    """Hitung Parabolic SAR dengan default 0.02, 0.2"""
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    
+    high = df['High']; low = df['Low']; close = df['Close']
     psar = high.copy()
     psar_bull = True
     af = acceleration
     ep = low.iloc[0] if psar_bull else high.iloc[0]
     psar.iloc[0] = close.iloc[0]
-    
     for i in range(1, len(df)):
         if psar_bull:
             psar.iloc[i] = psar.iloc[i-1] + af * (ep - psar.iloc[i-1])
@@ -125,75 +104,25 @@ def calculate_psar(df, acceleration=0.02, maximum=0.2):
                 psar.iloc[i] = ep
                 af = acceleration
                 ep = high.iloc[i]
-    
     return psar
 
-def calculate_atr(df, period=14):
-    """Hitung ATR"""
-    high_low = df['High'] - df['Low']
-    high_close = (df['High'] - df['Close'].shift()).abs()
-    low_close = (df['Low'] - df['Close'].shift()).abs()
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(period).mean()
-    return atr
-
 def get_indicators(df):
-    """Hitung semua indikator"""
     df = df.copy()
     df['RSI'] = calculate_rsi(df['Close'])
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA50'] = df['Close'].rolling(50).mean()
     df['Volume_MA20'] = df['Volume'].rolling(20).mean()
-    df['ATR'] = calculate_atr(df)
     df['PSAR'] = calculate_psar(df, acceleration=0.02, maximum=0.2)
     return df
 
-# ==================== PSAR AGE FIXED ====================
-
-def get_psar_age(df):
-    """
-    Hitung berapa hari sejak PSAR berubah dari Falling ke Rising.
-    PSAR Age = 0 hari = baru berubah hari ini.
-    PSAR Age > 3 = sinyal basi.
-    """
-    if df is None or df.empty or 'PSAR' not in df.columns:
-        return 999
-    
-    # Cari dari data paling awal ke akhir
-    found_break = False
-    break_index = None
-    
-    for i in range(1, len(df)):
-        prev = df.iloc[i-1]
-        curr = df.iloc[i]
-        
-        prev_falling = prev['Close'] <= prev['PSAR']
-        curr_rising = curr['Close'] > curr['PSAR']
-        
-        if prev_falling and curr_rising:
-            found_break = True
-            break_index = i
-            break
-    
-    if not found_break:
-        return 999
-    
-    # Hitung usia dari titik break sampai hari terakhir
-    age = len(df) - 1 - break_index
-    return age
-
 # ==================== SCREENER ====================
-
-def check_break_psar(df, max_psar_age=3):
+def check_break_psar(df):
     """
-    Cek Break Falling PSAR:
-    - PSAR kemarin di atas harga (trend turun)
-    - PSAR hari ini di bawah harga (trend naik)
-    - PSAR Age <= max_psar_age (biar gak kasih sinyal bekas)
-    + semua filter tambahan
+    Break PSAR + Hard Filter:
+    - PSAR berubah dari atas ke bawah
+    - Harga belum naik >5% dalam 5 hari terakhir (BIAR SKIP SINYAL BASI!)
     """
-    if df is None or df.empty or len(df) < 3:
+    if df is None or df.empty or len(df) < 10:
         return None
     
     df = get_indicators(df)
@@ -205,12 +134,12 @@ def check_break_psar(df, max_psar_age=3):
     if not (prev['Close'] <= prev['PSAR'] and last['Close'] > last['PSAR']):
         return None
     
-    # 2. PSAR Age
-    psar_age = get_psar_age(df)
-    logger.info(f"PSAR Age: {psar_age} days")
-    
-    if psar_age > max_psar_age:
-        logger.info(f"SKIP: PSAR Age too old: {psar_age} days")
+    # 2. HARDCORE FILTER: Harga naik >5% dalam 5 hari terakhir
+    # Kalo udah naik >5% dalam 5 hari, SKIP (karena udah basi)
+    price_5_days_ago = df.iloc[-6]['Close']
+    change_5d = (last['Close'] - price_5_days_ago) / price_5_days_ago * 100
+    if change_5d > 5:
+        logger.info(f"SKIP: Harga naik {change_5d:.1f}% dalam 5 hari (basi)")
         return None
     
     # 3. Price < 1000
@@ -222,7 +151,7 @@ def check_break_psar(df, max_psar_age=3):
     if avg_value < 2_000_000_000:
         return None
     
-    # 5. Close < ARA (20% dari harga sebelumnya)
+    # 5. Close < ARA
     ara = prev['Close'] * 1.20
     if last['Close'] >= ara:
         return None
@@ -235,68 +164,19 @@ def check_break_psar(df, max_psar_age=3):
     if last['RSI'] <= prev['RSI']:
         return None
     
-    # 8. Filter tambahan: harga belum naik terlalu jauh (kecuali PSAR Age 0)
-    change_from_break = (last['Close'] - prev['Close']) / prev['Close'] * 100
-    if psar_age > 0 and change_from_break > 10:
-        logger.info(f"SKIP: Harga sudah naik {change_from_break:.1f}% dari PSAR break (PSAR Age: {psar_age})")
-        return None
+    change = (last['Close'] - prev['Close']) / prev['Close'] * 100
     
     return {
-        'ticker': None,
         'price': last['Close'],
         'rsi': last['RSI'],
         'volume': last['Volume'],
         'volume_ma20': last['Volume_MA20'],
         'avg_value': avg_value,
-        'psar': last['PSAR'],
-        'atr': last['ATR'],
-        'change': change_from_break,
-        'psar_age': psar_age,
+        'change': change,
         'date': last.name.strftime('%Y-%m-%d')
     }
 
-# ==================== PREDICTIVE SCORE (PF) ====================
-
-def load_model():
-    """Load model dari file .pkl, kalo gak ada pake dummy"""
-    try:
-        if os.path.exists(MODEL_FILE):
-            with open(MODEL_FILE, 'rb') as f:
-                model = pickle.load(f)
-            logger.info("Model loaded from model.pkl")
-            return model
-        else:
-            logger.warning("model.pkl not found, using dummy model")
-            return train_dummy_model()
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        return train_dummy_model()
-
-def train_dummy_model():
-    """Dummy model kalo gak ada model.pkl"""
-    np.random.seed(42)
-    n = 700
-    X = np.random.rand(n, 4)
-    y = (X[:, 0] * 0.3 + X[:, 1] * 0.4 + X[:, 2] * 0.2 > 0.5).astype(int)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    logger.info("Dummy model trained")
-    return model
-
-def predict_pf(model, features):
-    """Hitung Predictive Score (0-100)"""
-    if model is None:
-        return 50
-    try:
-        features = np.array(features).reshape(1, -1)
-        proba = model.predict_proba(features)[0][1]
-        return int(min(max(proba * 100, 0), 100))
-    except Exception as e:
-        logger.error(f"PF prediction error: {e}")
-        return 50
-
 # ==================== MAIN ====================
-
 def main():
     logger.info(f"Starting SMIOO-SCANNER at {NOW}")
     
@@ -305,8 +185,6 @@ def main():
         send_telegram(f"❌ {NOW} - tickers.txt tidak ditemukan!")
         return
     
-    model = load_model()
-    
     results = []
     for ticker in tickers:
         logger.info(f"Scanning {ticker}...")
@@ -314,52 +192,32 @@ def main():
         if df is None or df.empty:
             continue
         
-        signal = check_break_psar(df, max_psar_age=3)
+        signal = check_break_psar(df)
         if signal is None:
             continue
         
-        volume_ratio = signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 1
-        features = [
-            signal['rsi'] / 100,
-            volume_ratio / 5,
-            signal['change'] / 10,
-            signal['atr'] / 100 if signal['atr'] > 0 else 0.01
-        ]
-        pf_score = predict_pf(model, features)
-        
-        psar_penalty = max(0, signal['psar_age'] - 1) * 10
-        pf_adjusted = max(0, pf_score - psar_penalty)
-        
-        if pf_adjusted >= 85 and signal['rsi'] > 60 and volume_ratio > 2:
-            trade_type = "🔥 FAST TRADE (P1-P3)"
-            hold_time = "3 hari"
-            tp = 6
-        elif pf_adjusted >= 70 and 40 <= signal['rsi'] <= 60:
-            trade_type = "🟡 MAX PROFIT (P4-P7)"
-            hold_time = "7 hari"
-            tp = 10
-        else:
-            continue
+        # PF dummy (nanti diganti pake model asli)
+        pf_score = 50
+        if signal['rsi'] > 60 and signal['change'] > 3:
+            pf_score = 85
+        elif signal['rsi'] > 50:
+            pf_score = 70
         
         results.append({
             'ticker': ticker.replace('.JK', ''),
             'price': signal['price'],
             'rsi': signal['rsi'],
             'change': signal['change'],
-            'pf': pf_adjusted,
-            'volume_ratio': volume_ratio,
+            'pf': pf_score,
+            'volume_ratio': signal['volume'] / signal['volume_ma20'] if signal['volume_ma20'] > 0 else 1,
             'avg_value_b': signal['avg_value'] / 1_000_000_000,
-            'psar_age': signal['psar_age'],
-            'trade_type': trade_type,
-            'hold_time': hold_time,
-            'tp': tp,
             'date': signal['date']
         })
     
     results.sort(key=lambda x: x['pf'], reverse=True)
     
     if not results:
-        msg = f"📭 *{NOW}*\nTidak ada sinyal Break Falling PSAR hari ini."
+        msg = f"📭 *{NOW}*\nTidak ada sinyal Break PSAR hari ini."
         send_telegram(msg)
         logger.info("No signals found")
         return
@@ -371,9 +229,7 @@ def main():
     for r in results:
         msg += f"*{r['ticker']}* ({r['price']:.0f}) | PF: {r['pf']} | RSI: {r['rsi']:.0f}\n"
         msg += f"  Δ: {r['change']:.1f}% | Vol Ratio: {r['volume_ratio']:.1f}x | Avg: {r['avg_value_b']:.1f}B\n"
-        msg += f"  PSAR Age: {r['psar_age']} hari | {r['trade_type']}\n"
-        msg += f"  Target: {r['price'] * (1 + r['tp']/100):.0f} (+{r['tp']}%) | Hold: {r['hold_time']}\n"
-        msg += "\n"
+        msg += f"  Target: {r['price'] * 1.06:.0f} (+6%) | Hold: 3 hari\n\n"
     
     msg += "==============================\n"
     msg += "⚠️ *Tetap DYOR!* Hasil hanya referensi awal."
